@@ -494,6 +494,7 @@ static void free_build(C_Build *b) {
     for (size_t i = 0; i < b->dep_count; ++i) {
         C_Dependency *d = &b->deps[i];
         free_list(&d->links); free_list(&d->include_dirs); free_list(&d->source_patterns); free_list(&d->compile_flags);
+        free_list(&d->checkout_paths);
     }
     free(b);
 }

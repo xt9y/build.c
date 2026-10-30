@@ -13,6 +13,22 @@ static void cbuild_dep_artifact_name(char out[C_MAX_NAME + 32], const C_Dependen
     else snprintf(out, C_MAX_NAME + 32, "%s.dll", d->build_target);
 }
 
+#include "git_fetch.h"
+
+static bool checkout_path_valid(const char *path) {
+    if (!path || !path[0] || path[0] == '/' || path[0] == '\\') return false;
+    const char *part = path;
+    for (const char *p = path;; ++p) {
+        if (*p == '\\' || *p == ':' || (*p && (unsigned char)*p < 32)) return false;
+        if (*p == '/' || !*p) {
+            size_t n = (size_t)(p - part);
+            if (!n || (n == 1 && part[0] == '.') || (n == 2 && part[0] == '.' && part[1] == '.')) return false;
+            if (!*p) return true;
+            part = p + 1;
+        }
+    }
+}
+
 static void resolve_dependency(C_Dependency *d, const Options *opt, LockFile *lock, DepState *s) {
     char cache[PATH_MAX], gitroot[PATH_MAX], srcroot[PATH_MAX], pkgroot[PATH_MAX];
     cache_root(cache); path_join(gitroot, cache, "git"); path_join(srcroot, cache, "src"); path_join(pkgroot, cache, "pkg");
@@ -20,23 +36,19 @@ static void resolve_dependency(C_Dependency *d, const Options *opt, LockFile *lo
     char urlkey[17]; hash_hex(hash_string(d->git), urlkey);
     char mirrorname[32]; snprintf(mirrorname, sizeof(mirrorname), "%s.git", urlkey);
     char mirror[PATH_MAX]; path_join(mirror, gitroot, mirrorname);
+    LockEntry *e = find_lock(lock, d);
+    bool fetched = false;
     if (!is_dir(mirror)) {
         note("FETCH", "%s", d->name);
-        char *argv[] = {"git", "clone", "--mirror", "--depth=1", "--no-single-branch", d->git, mirror, NULL};
-        if (run_argv(argv, opt->verbose, NULL) != 0) die("failed to clone %s", d->git);
-    }
-    LockEntry *e = find_lock(lock, d);
-    if (!e) {
-        char *fetch[] = {"git", "--git-dir", mirror, "fetch", "--depth=1", "--prune", "origin", NULL};
-        if (run_argv(fetch, opt->verbose, NULL) != 0) die("failed to fetch %s", d->name);
-        char expr[C_MAX_NAME + 32]; snprintf(expr, sizeof(expr), "%s^{commit}", d->ref);
-        char *rev[] = {"git", "--git-dir", mirror, "rev-parse", expr, NULL};
-        char *resolved = capture_argv(rev, NULL);
-        if (!resolved) {
-            snprintf(expr, sizeof(expr), "origin/%s^{commit}", d->ref);
-            char *rev2[] = {"git", "--git-dir", mirror, "rev-parse", expr, NULL};
-            resolved = capture_argv(rev2, NULL);
+        if (git_init_requested(mirror, d->git, e ? e->resolved : d->ref, d->asset_only || d->checkout_paths.count, opt) != 0) {
+            remove_tree(mirror); die("failed to fetch %s", d->git);
         }
+        fetched = true;
+    }
+    if (!e) {
+        if (!fetched && git_fetch_requested(mirror, d->ref, d->asset_only || d->checkout_paths.count, opt) != 0)
+            die("failed to fetch %s", d->name);
+        char *resolved = git_resolve_requested(mirror, d->ref);
         if (!resolved) die("cannot resolve %s at %s", d->name, d->ref);
         if (lock->count >= C_MAX_DEPS) die("too many dependencies");
         e = &lock->entries[lock->count++]; memset(e, 0, sizeof(*e));
@@ -44,13 +56,33 @@ static void resolve_dependency(C_Dependency *d, const Options *opt, LockFile *lo
         snprintf(e->requested, sizeof(e->requested), "%s", d->ref); snprintf(e->resolved, sizeof(e->resolved), "%s", resolved); free(resolved);
     }
     snprintf(s->resolved, sizeof(s->resolved), "%s", e->resolved);
-    char keyinput[C_MAX_PATH + 128]; snprintf(keyinput, sizeof(keyinput), "%s:%s", d->git, e->resolved);
+    char expr[128]; snprintf(expr, sizeof(expr), "%s^{commit}", e->resolved);
+    char *has[] = {"git", "--git-dir", mirror, "cat-file", "-e", expr, NULL};
+    if (run_argv(has, false, NULL) != 0 &&
+        git_fetch_requested(mirror, e->resolved, d->asset_only || d->checkout_paths.count, opt) != 0)
+        die("cannot fetch locked commit for %s", d->name);
+    if (git_pin_commit(mirror, e->resolved, opt) != 0) die("cannot retain locked commit for %s", d->name);
+    char keyinput[C_MAX_PATH + 160]; snprintf(keyinput, sizeof(keyinput), "%s:%s", d->git, e->resolved);
+    if (d->checkout_paths.count) {
+        uint64_t selected = 1469598103934665603ULL;
+        for (size_t i = 0; i < d->checkout_paths.count; ++i) {
+            if (!checkout_path_valid(d->checkout_paths.items[i])) die("invalid checkout path for %s", d->name);
+            selected = hash_update(selected, d->checkout_paths.items[i], strlen(d->checkout_paths.items[i]) + 1);
+        }
+        snprintf(keyinput, sizeof(keyinput), "%s:%s:%016llx", d->git, e->resolved, (unsigned long long)selected);
+    }
     char key[17]; hash_hex(hash_string(keyinput), key);
     char srcname[C_MAX_NAME + 32]; snprintf(srcname, sizeof(srcname), "%s-%s", d->name, key); path_join(s->source, srcroot, srcname);
     if (!is_dir(s->source)) {
         mkdir_p(s->source);
-        char *co[] = {"git", "--git-dir", mirror, "--work-tree", s->source, "checkout", "-f", e->resolved, "--", ".", NULL};
-        if (run_argv(co, opt->verbose, NULL) != 0) { remove_tree(s->source); die("failed to checkout %s", d->name); }
+        StrVec co = {0}; vec_push(&co, "git"); vec_push(&co, "--git-dir"); vec_push(&co, mirror);
+        vec_push(&co, "--work-tree"); vec_push(&co, s->source); vec_push(&co, "checkout");
+        vec_push(&co, "-f"); vec_push(&co, e->resolved); vec_push(&co, "--");
+        if (d->checkout_paths.count) {
+            for (size_t i = 0; i < d->checkout_paths.count; ++i) vec_push(&co, d->checkout_paths.items[i]);
+        } else vec_push(&co, ".");
+        int rc = run_vec(&co, opt->verbose, NULL); vec_free(&co);
+        if (rc != 0) { remove_tree(s->source); die("failed to checkout %s", d->name); }
     }
     char pkgname[C_MAX_NAME + 32]; snprintf(pkgname, sizeof(pkgname), "%s-%s", d->name, key); path_join(s->package, pkgroot, pkgname); mkdir_p(s->package);
 }

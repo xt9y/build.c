@@ -28,6 +28,7 @@ extern "C" {
 #define C_BUILD_API_VERSION_MINOR 0
 #define C_BUILD_API_VERSION_PATCH 0
 #define C_BUILD_HAS_DEPENDENCY_PATHS 1
+#define C_BUILD_HAS_DEPENDENCY_CHECKOUT 1
 
 #define C_MAX_TARGETS 256
 #define C_MAX_DEPS 256
@@ -76,6 +77,7 @@ typedef struct C_Dependency {
     C_StringList include_dirs;
     C_StringList source_patterns;
     C_StringList compile_flags;
+    C_StringList checkout_paths;
     char build_target[C_MAX_NAME];
     C_TargetKind build_target_kind;
 } C_Dependency;
@@ -305,6 +307,13 @@ static inline void c_dep_cbuild(C_Dependency *d, const char *target, C_TargetKin
 static inline void c_dep_include(C_Dependency *d, const char *path) { if (!d) c__fatal("c_dep_include received a null dependency"); c__push(&d->include_dirs, path); }
 static inline void c_dep_sources(C_Dependency *d, const char *pattern) { if (!d) c__fatal("c_dep_sources received a null dependency"); c__push(&d->source_patterns, pattern); }
 static inline void c_dep_subdir(C_Dependency *d, const char *path) { if (!d) c__fatal("c_dep_subdir received a null dependency"); c__copy(d->subdir, sizeof(d->subdir), path); }
+/* Optional repository-relative files/directories to download and check out.
+ * Omit to keep the complete tree. This does not change c_dep_subdir's root. */
+static inline void c_dep_checkout(C_Dependency *d, const char *path) {
+    if (!d) c__fatal("c_dep_checkout received a null dependency");
+    if (!path || !path[0]) c__fatal("c_dep_checkout path is empty");
+    c__push(&d->checkout_paths, path);
+}
 static inline void c_dep_flag(C_Dependency *d, const char *flag) { if (!d) c__fatal("c_dep_flag received a null dependency"); c__push(&d->compile_flags, flag); }
 /* Explicitly marks a Git dependency as a repository of assets. By default
    every repository-relative file is addressable through c_asset(). If specific
