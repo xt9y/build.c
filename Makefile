@@ -18,11 +18,11 @@ WINDOWS_INSTALL := src/windows_install.ps1
 
 all: $(TARGET) $(NATIVE)
 
-$(TARGET): $(WINDOWS_SOURCE) src/windows_platform.h src/windows_build.h include/cbuild.h
+$(TARGET): $(WINDOWS_SOURCE) src/windows_platform.h src/windows_build.h src/dependency_paths.h include/cbuild.h
 	powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(BUILD)' | Out-Null"
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Iinclude $(WINDOWS_SOURCE) -o $(TARGET)
 
-$(NATIVE): $(WINDOWS_SOURCE) src/windows_platform.h src/windows_build.h include/cbuild.h
+$(NATIVE): $(WINDOWS_SOURCE) src/windows_platform.h src/windows_build.h src/dependency_paths.h include/cbuild.h
 	powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(BUILD)' | Out-Null"
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Iinclude $(WINDOWS_SOURCE) -o $(NATIVE)
 
@@ -56,7 +56,7 @@ endif
 
 all: $(TARGET)
 
-$(NATIVE): src/cli.c src/main.c src/cache_io.h src/cache_cleanup.h src/perf_v2.h src/cbuild_target_dep.h include/cbuild.h
+$(NATIVE): src/cli.c src/main.c src/cache_io.h src/cache_cleanup.h src/perf_v2.h src/cbuild_target_dep.h src/dependency_paths.h include/cbuild.h
 	mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(PORTABILITY_CPPFLAGS) $(CFLAGS) -include src/cache_io.h -include src/cache_cleanup.h -Iinclude -DCBUILD_HEADER_PATH='"$(abspath include/cbuild.h)"' src/cli.c $(LDLIBS) -o $(NATIVE)
 

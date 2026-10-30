@@ -27,6 +27,7 @@ extern "C" {
 #define C_BUILD_API_VERSION_MAJOR 1
 #define C_BUILD_API_VERSION_MINOR 0
 #define C_BUILD_API_VERSION_PATCH 0
+#define C_BUILD_HAS_DEPENDENCY_PATHS 1
 
 #define C_MAX_TARGETS 256
 #define C_MAX_DEPS 256
@@ -201,6 +202,10 @@ static inline void c_default_target(C_Build *b, C_Target *target) {
     b->default_target = (int)idx;
 }
 
+/* @name@ refers to a declared Git dependency's checkout (including subdir).
+ * Supported in c_sources, c_include and c_generate paths/commands. Commands
+ * receive a shell-quoted path: do not add quotes around the placeholder.
+ * Example: c_sources(target, "@raylib@/src/rcore.c"); */
 static inline void c_sources(C_Target *t, const char *pattern) { if (!t) c__fatal("c_sources received a null target"); c__push(&t->sources, pattern); }
 static inline void c_include(C_Target *t, const char *path) { if (!t) c__fatal("c_include received a null target"); c__push(&t->includes, path); }
 static inline void c_define(C_Target *t, const char *value) { if (!t) c__fatal("c_define received a null target"); c__push(&t->defines, value); }

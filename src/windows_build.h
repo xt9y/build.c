@@ -252,8 +252,11 @@ static void build_cbuild_dependency(C_Dependency *d, const Options *opt, DepStat
     if (!file_exists(s->artifact)) die("cbuild dependency did not produce %s", s->artifact);
 }
 
+#include "dependency_paths.h"
+
 static void prepare_dependencies(C_Build *b, const Options *opt, DepState states[]) {
     resolve_all(b, opt, states);
+    expand_dependency_paths(b, states);
     for (size_t i = 0; i < b->dep_count; ++i) {
         build_source_dependency(&b->deps[i], opt, &states[i]);
         build_cmake_dependency(&b->deps[i], opt, &states[i]);

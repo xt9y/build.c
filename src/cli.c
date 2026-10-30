@@ -887,6 +887,8 @@ static void compiler_prepare_target_links(C_Build *b, DepState states[]) {
     for (size_t i = 0; i < b->dep_count; ++i) if (b->deps[i].kind == C_DEP_SOURCE) b->deps[i].kind = C_DEP_HEADER_ONLY;
 }
 
+#include "dependency_paths.h"
+
 static void compiler_resolve_all(C_Build *b, const Options *opt, DepState states[]) {
     LockFile lock;
     load_lock(&lock);
@@ -896,6 +898,8 @@ static void compiler_resolve_all(C_Build *b, const Options *opt, DepState states
         resolve_dependency(d, opt, &lock, &states[i], false);
     }
     save_lock(&lock);
+
+    expand_dependency_paths(b, states);
 
     size_t source_indices[C_MAX_DEPS];
     size_t source_count = 0;
@@ -1163,8 +1167,12 @@ static char *compiler_build_target_graph(C_Build *b, C_Target *t, DepState state
         free(dep_output);
     }
     bool seen[C_MAX_TARGETS] = {0};
+    C_StringList own_flags = t->ldflags;
+    memset(&t->ldflags, 0, sizeof(t->ldflags));
     for (size_t i = 0; i < t->target_dep_count; ++i)
         compiler_append_target_link_closure(b, t, t->target_deps[i], graph_outputs, seen);
+    for (size_t i = 0; i < own_flags.count; ++i) c__push(&t->ldflags, own_flags.items[i]);
+    free_c_list(&own_flags);
     graph_outputs[idx] = compiler_build_target(b, t, states, opt);
     graph_state[idx] = 2;
     return xstrdup(graph_outputs[idx]);
