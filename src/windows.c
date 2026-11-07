@@ -85,6 +85,64 @@ static void write_compile_database(C_Build *b, C_Target *t, DepState states[], c
     fclose(db);
 }
 
+
+static void check_target_graph(C_Build *b, C_Target *t, unsigned char state[]) {
+    ptrdiff_t idx = t - b->targets;
+    if (idx < 0 || (size_t)idx >= b->target_count) die("invalid target dependency");
+    if (state[idx] == 1) die("cyclic target dependency involving %s", t->name);
+    if (state[idx] == 2) return;
+    state[idx] = 1;
+    for (size_t i = 0; i < t->target_dep_count; ++i) {
+        C_Target *dep = t->target_deps[i];
+        if (dep->kind != C_TARGET_STATIC_LIBRARY && dep->kind != C_TARGET_SHARED_LIBRARY)
+            die("target %s links non-library target %s", t->name, dep->name);
+        check_target_graph(b, dep, state);
+    }
+    state[idx] = 2;
+}
+
+static int command_check(const Options *opt) {
+    C_Build *b = load_build(opt);
+    if (opt->target) (void)select_target(b, opt);
+    unsigned char state[C_MAX_TARGETS] = {0};
+    for (size_t i = 0; i < b->target_count; ++i)
+        check_target_graph(b, &b->targets[i], state);
+    for (size_t i = 0; i < b->target_count; ++i) {
+        C_Target *t = &b->targets[i];
+        if (!t->sources.count && !t->dep_count && !t->generated_outputs.count)
+            die("target %s has no sources", t->name);
+        if (t->generated_outputs.count != t->generated_inputs.count ||
+            t->generated_outputs.count != t->generated_commands.count)
+            die("invalid generated sources for %s", t->name);
+    }
+    note("CHECK", "%zu targets, %zu dependencies", b->target_count, b->dep_count);
+    free_build(b);
+    return 0;
+}
+
+static int command_compdb(const Options *opt) {
+    C_Build *b = load_build(opt);
+    DepState *states = new_dep_states();
+    resolve_all(b, opt, states);
+    C_Target *selected = opt->target ? select_target(b, opt) : NULL;
+    char cwd[PATH_MAX];
+    if (!_getcwd(cwd, sizeof(cwd))) die("cannot determine working directory");
+    slashify(cwd);
+    FILE *db = fopen("compile_commands.json", "w");
+    if (!db) die("cannot write compile_commands.json");
+    bool first = true, visited[C_MAX_TARGETS] = {0};
+    fputs("[\n", db);
+    for (size_t i = 0; i < b->target_count; ++i)
+        if (!selected || selected == &b->targets[i])
+            write_target_compile_commands(db, &first, cwd, b, &b->targets[i], states, opt, visited);
+    fputs("\n]\n", db);
+    if (fclose(db) != 0) die("cannot close compile_commands.json");
+    note("COMPDB", "compile_commands.json");
+    free(states);
+    free_build(b);
+    return 0;
+}
+
 static int command_build(const Options *opt, bool run) {
     C_Build *b = load_build(opt); DepState *states = new_dep_states(); prepare_dependencies(b, opt, states);
     unsigned char mark[C_MAX_TARGETS] = {0}; char *outputs[C_MAX_TARGETS] = {0}; C_Target *t = select_target(b, opt); char *output = build_target_graph(b, t, states, opt, mark, outputs);
@@ -160,7 +218,7 @@ static void usage(void) {
     puts("c - a build system and dependency manager for C\n\n"
          "usage:\n"
          "  c init\n  c build [target] [--release] [-j N] [-v]\n  c run [target] [--release] [-j N] [-v] [-- args...]\n"
-         "  c fetch\n  c update [dependency]\n  c deps [tree|clean]\n  c test [target]\n  c clean\n  c cache [clean]\n  c doctor\n  c --version\n\n"
+         "  c fetch\n  c update [dependency]\n  c deps [tree|clean]\n  c tree\n  c check [target]\n  c compdb [target]\n  c test [target]\n  c clean\n  c cache [clean]\n  c doctor\n  c --version\n\n"
          "environment:\n  CC              C compiler (default: cc)\n  AR              archiver (default: ar)\n  C_CACHE_DIR     override global cache directory\n  C_INCLUDE_DIR   directory containing cbuild.h\n");
 }
 
@@ -201,6 +259,7 @@ static Options parse_options(int argc, char **argv) {
 static bool is_command_token(const char *s) {
     static const char *commands[] = {
         "init", "build", "run", "watch", "fetch", "update", "deps", "test",
+        "check", "tree", "compdb",
         "clean", "cache", "doctor", "help", "--help", "-h", "version", "--version"
     };
     for (size_t i = 0; i < C_ARRAY_LEN(commands); ++i) if (!strcmp(s, commands[i])) return true;
@@ -226,6 +285,9 @@ static int run_segment(int argc, char **argv) {
     if (!strcmp(opt.command,"fetch")) return command_fetch(&opt);
     if (!strcmp(opt.command,"update")) return command_update(&opt);
     if (!strcmp(opt.command,"deps")) return command_deps(&opt);
+    if (!strcmp(opt.command,"tree")) { Options tree = opt; tree.target = "tree"; return command_deps(&tree); }
+    if (!strcmp(opt.command,"check")) return command_check(&opt);
+    if (!strcmp(opt.command,"compdb")) return command_compdb(&opt);
     if (!strcmp(opt.command,"clean")) return command_clean();
     if (!strcmp(opt.command,"cache")) return command_cache(&opt);
     if (!strcmp(opt.command,"doctor")) return command_doctor(&opt);
