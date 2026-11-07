@@ -121,3 +121,29 @@ jobs:
           export C_INCLUDE_DIR="$root/include"
           "$root/build/c" build app
           "$root/build/c" run app
+      - name: pkg-config smoke
+        shell: bash
+        run: |
+          set -eu
+          pkg-config --exists zlib
+          root="$PWD"
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          mkdir -p "$tmp/src"
+          cat > "$tmp/src/main.c" <<'EOF'
+          #include <zlib.h>
+          int main(void) { return zlibVersion() == 0; }
+          EOF
+          cat > "$tmp/build.c" <<'EOF'
+          #include <cbuild.h>
+          void build(C_Build *b) {
+              C_Dependency *zlib = c_pkg_config(b, "zlib", "zlib");
+              C_Target *app = c_executable(b, "app");
+              c_sources(app, "src/main.c");
+              c_use(app, zlib);
+          }
+          EOF
+          cd "$tmp"
+          export C_INCLUDE_DIR="$root/include"
+          "$root/build/c" build
+          "$root/build/c" run
