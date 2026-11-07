@@ -1410,9 +1410,14 @@ static void compiler_cmd_check(const Options *opt) {
             const char *pattern = t->sources.items[j];
             glob_t found = {0};
             int rc = glob(pattern, 0, NULL, &found);
-            if (rc == GLOB_NOMATCH && t->generated_outputs.count) {
+            if (rc == GLOB_NOMATCH) {
+                bool generated = false;
+                for (size_t k = 0; k < t->generated_outputs.count; ++k)
+                    if (fnmatch(pattern, t->generated_outputs.items[k], 0) == 0)
+                        generated = true;
                 globfree(&found);
-                continue;
+                if (generated) continue;
+                die("source pattern matched nothing: %s", pattern);
             }
             if (rc != 0) die("source pattern matched nothing or failed: %s", pattern);
             sources += found.gl_pathc;
@@ -1422,6 +1427,42 @@ static void compiler_cmd_check(const Options *opt) {
     note("CHECK", "%zu targets, %zu dependencies, %zu source files",
          b->target_count, b->dep_count, sources);
     free_build(b);
+}
+
+static void compiler_compdb_expand_sources(C_Target *t, C_Build *b,
+                                           DepState states[], StrVec *out) {
+    for (size_t i = 0; i < t->sources.count; ++i) {
+        const char *pattern = t->sources.items[i];
+        glob_t matches = {0};
+        int rc = glob(pattern, 0, NULL, &matches);
+        if (rc == 0) {
+            for (size_t j = 0; j < matches.gl_pathc; ++j)
+                vec_push(out, matches.gl_pathv[j]);
+        } else if (rc == GLOB_NOMATCH) {
+            bool matched = false;
+            for (size_t j = 0; j < t->generated_outputs.count; ++j)
+                if (fnmatch(pattern, t->generated_outputs.items[j], 0) == 0) {
+                    vec_push(out, t->generated_outputs.items[j]);
+                    matched = true;
+                }
+            if (!matched) die("source pattern matched nothing: %s", pattern);
+        } else die("source glob failed: %s", pattern);
+        globfree(&matches);
+    }
+    for (size_t i = 0; i < t->dep_count; ++i) {
+        C_Dependency *d = t->deps[i];
+        if (d->kind != C_DEP_SOURCE) continue;
+        ptrdiff_t idx = d - b->deps;
+        if (idx < 0 || (size_t)idx >= b->dep_count) die("invalid dependency");
+        char root[PATH_MAX];
+        if (d->subdir[0]) path_join(root, states[idx].source, d->subdir);
+        else c__copy(root, sizeof(root), states[idx].source);
+        for (size_t j = 0; j < d->source_patterns.count; ++j) {
+            char pattern[PATH_MAX];
+            path_join(pattern, root, d->source_patterns.items[j]);
+            expand_pattern(pattern, out);
+        }
+    }
 }
 
 /* Generate editor compile commands without compiling or linking a target. */
@@ -1451,7 +1492,7 @@ static void compiler_cmd_compdb(const Options *opt) {
         C_Target *t = &b->targets[i];
         if (selected && selected != t) continue;
         StrVec sources = {0};
-        expand_sources(t, b, states, &sources);
+        compiler_compdb_expand_sources(t, b, states, &sources);
         for (size_t j = 0; j < sources.count; ++j) {
             const char *src = sources.items[j];
             char objdir[PATH_MAX], obj[PATH_MAX];
