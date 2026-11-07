@@ -102,6 +102,7 @@ typedef struct C_Target {
     struct C_Target *target_deps[C_MAX_TARGETS];
     size_t target_dep_count;
     int unity_chunk;  /* 0=inherit CLI, 1=off, -1=auto, >=2=fixed chunk */
+    char std_module_source[C_MAX_PATH]; /* empty=disabled, @auto@=search libc++ */
 } C_Target;
 
 typedef struct C_Build {
@@ -220,6 +221,12 @@ static inline void c_framework(C_Target *t, const char *name) { if (!t) c__fatal
 static inline void c_unity(C_Target *t, int chunk_size) { if (!t) c__fatal("c_unity received a null target"); t->unity_chunk = chunk_size > 1 ? chunk_size : 1; }
 static inline void c_unity_auto(C_Target *t) { if (!t) c__fatal("c_unity_auto received a null target"); t->unity_chunk = -1; }
 static inline void c_no_unity(C_Target *t) { if (!t) c__fatal("c_no_unity received a null target"); t->unity_chunk = 1; }
+/* Opt into the Clang C++23 standard library module. Pass NULL for discovery. */
+static inline void c_std_module(C_Target *t, const char *source) {
+    if (!t) c__fatal("c_std_module received a null target");
+    c__copy(t->std_module_source, sizeof(t->std_module_source),
+            source && *source ? source : "@auto@");
+}
 
 static inline void c_standard(C_Target *t, C_Standard standard) {
     if (!t) c__fatal("c_standard received a null target");
