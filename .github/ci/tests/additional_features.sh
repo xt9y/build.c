@@ -27,7 +27,7 @@ void build(C_Build *b) {
 SRC
 (
     cd "$TMP/project"
-    C_INCLUDE_DIR="$INC" "$C_BIN" check >check.log
+    C_INCLUDE_DIR="$INC" "$C_BIN" check >check.log 2>&1
     grep -q "1 targets" check.log
     C_INCLUDE_DIR="$INC" "$C_BIN" tree >tree.log
     grep -q "local" tree.log
