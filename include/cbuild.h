@@ -74,6 +74,7 @@ typedef struct C_Dependency {
     char subdir[C_MAX_PATH];
     C_DepKind kind;
     int asset_only; /* opted-in: selected mappings may use sparse Git checkout */
+    int local_path; /* local source directory; not written to c.lock */
     C_StringList links;          /* internal paired source/destination storage for c_dep_asset */
     C_StringList include_dirs;
     C_StringList source_patterns;
@@ -282,6 +283,20 @@ static inline C_Dependency *c_git(C_Build *b, const char *name, const char *git,
 }
 
 /* Link flags and include paths are resolved using pkg-config at build time. */
+/* A directory containing headers, source files, or a separate build.c project. */
+static inline C_Dependency *c_path(C_Build *b, const char *name, const char *path) {
+    c__check_dep_name(b, name);
+    if (!path || !*path) c__fatal("local dependency path is empty");
+    if (b->dep_count >= C_MAX_DEPS) c__fatal("too many dependencies");
+    C_Dependency *d = &b->deps[b->dep_count++];
+    memset(d, 0, sizeof(*d));
+    c__copy(d->name, sizeof(d->name), name);
+    c__copy(d->git, sizeof(d->git), path);
+    d->local_path = 1;
+    d->kind = C_DEP_HEADER_ONLY;
+    return d;
+}
+
 static inline C_Dependency *c_pkg_config(C_Build *b, const char *name, const char *package) {
     c__check_dep_name(b, name);
     c__require_name(package, "pkg-config package");
