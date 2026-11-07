@@ -1135,6 +1135,15 @@ static char *compiler_build_target(C_Build *b, C_Target *t, DepState states[], c
         unity_mode = 1;
     }
     uint64_t sig = target_signature(t, b, states, opt, &sources);
+    StrVec public_usage = {0};
+    bool usage_visited[C_MAX_TARGETS] = {0};
+    compiler_append_public_usage(&public_usage, t, b, usage_visited);
+    for (size_t i = 0; i < public_usage.count; ++i) {
+        sig = hash_update(sig, public_usage.items[i], strlen(public_usage.items[i]));
+        const char separator = '\0';
+        sig = hash_update(sig, &separator, 1);
+    }
+    vec_free(&public_usage);
     uint64_t tool = compiler_tool_identity(opt->cc);
     sig = hash_update(sig, &tool, sizeof(tool));
     for (size_t i = 0; i < modules.count; ++i) {
