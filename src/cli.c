@@ -866,14 +866,14 @@ static void compiler_build_dependency(const C_Dependency *d, const Options *opt,
 
 
 /* pkg-config supplies flags as shell-style words, not as one compiler argument. */
-static void compiler_split_flags(StrVec *out, const char *text) {
+static void compiler_split_flags(C_StringList *out, const char *text) {
     char word[PATH_MAX * 2];
     size_t size = 0;
     char quote = 0;
     for (const char *p = text;; ++p) {
         char ch = *p;
         if (!ch || (!quote && (ch == ' ' || ch == '\t' || ch == '\n'))) {
-            if (size) { word[size] = '\0'; vec_push(out, word); size = 0; }
+            if (size) { word[size] = '\0'; c__push(out, word); size = 0; }
             if (!ch) break;
             continue;
         }
@@ -888,7 +888,7 @@ static void compiler_split_flags(StrVec *out, const char *text) {
     if (quote) die("unterminated pkg-config argument");
 }
 
-static void compiler_pkg_config_query(const C_Dependency *d, const char *flag, StrVec *out) {
+static void compiler_pkg_config_query(const C_Dependency *d, const char *flag, C_StringList *out) {
     StrVec command = {0};
     vec_push(&command, "pkg-config");
     vec_push(&command, flag);
@@ -901,8 +901,8 @@ static void compiler_pkg_config_query(const C_Dependency *d, const char *flag, S
 }
 
 static void compiler_resolve_pkg_config(C_Dependency *d) {
-    compiler_pkg_config_query(d, "--cflags", (StrVec *)&d->compile_flags);
-    compiler_pkg_config_query(d, "--libs", (StrVec *)&d->links);
+    compiler_pkg_config_query(d, "--cflags", &d->compile_flags);
+    compiler_pkg_config_query(d, "--libs", &d->links);
 }
 
 static void compiler_prepare_target_links(C_Build *b, DepState states[]) {
