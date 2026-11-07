@@ -212,6 +212,8 @@ static void append_public_usage(StrVec *a, C_Target *t, C_Build *b,
 }
 
 static void compiler_flags(StrVec *a, C_Target *t, C_Build *b, DepState states[], const Options *opt, const char *src) {
+    if (t->std_module_source[0] || strstr(src, ".cppm"))
+        die("C++ named modules are not yet supported by the native Windows compiler backend");
     vec_push(a, opt->cc);
     bool has_std = false;
     for (size_t i = 0; i < t->cflags.count; ++i) if (!strncmp(t->cflags.items[i], "-std=", 5)) has_std = true;
