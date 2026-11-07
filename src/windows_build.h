@@ -191,6 +191,26 @@ static void generated_sources(C_Target *t, const Options *opt) {
     }
 }
 
+static void append_public_usage(StrVec *a, C_Target *t, C_Build *b,
+                                bool visited[C_MAX_TARGETS]) {
+    ptrdiff_t idx = t - b->targets;
+    if (idx < 0 || (size_t)idx >= b->target_count) die("invalid target usage graph");
+    if (visited[idx]) return;
+    visited[idx] = true;
+    for (size_t i = 0; i < t->public_includes.count; ++i) {
+        char arg[PATH_MAX + 3];
+        snprintf(arg, sizeof(arg), "-I%s", t->public_includes.items[i]);
+        vec_push(a, arg);
+    }
+    for (size_t i = 0; i < t->public_defines.count; ++i) {
+        char arg[PATH_MAX + 3];
+        snprintf(arg, sizeof(arg), "-D%s", t->public_defines.items[i]);
+        vec_push(a, arg);
+    }
+    for (size_t i = 0; i < t->target_dep_count; ++i)
+        append_public_usage(a, t->target_deps[i], b, visited);
+}
+
 static void compiler_flags(StrVec *a, C_Target *t, C_Build *b, DepState states[], const Options *opt, const char *src) {
     vec_push(a, opt->cc);
     bool has_std = false;
@@ -200,6 +220,8 @@ static void compiler_flags(StrVec *a, C_Target *t, C_Build *b, DepState states[]
     if (!opt->release) vec_push(a, "-g");
     for (size_t i = 0; i < t->includes.count; ++i) { char x[PATH_MAX + 3]; snprintf(x, sizeof(x), "-I%s", t->includes.items[i]); vec_push(a, x); }
     for (size_t i = 0; i < t->defines.count; ++i) { char x[PATH_MAX + 3]; snprintf(x, sizeof(x), "-D%s", t->defines.items[i]); vec_push(a, x); }
+    bool visited[C_MAX_TARGETS] = {0};
+    append_public_usage(a, t, b, visited);
     for (size_t i = 0; i < t->cflags.count; ++i) vec_push(a, t->cflags.items[i]);
     append_dep_compile_flags(a, t, b, states);
 }
