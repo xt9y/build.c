@@ -1057,7 +1057,9 @@ static char *build_target(C_Build *b, C_Target *t, DepState states[], const Opti
 
 static void resolve_all(C_Build *b, const Options *opt, DepState states[], bool build_artifacts) {
     LockFile lock; load_lock(&lock);
-    for (size_t i = 0; i < b->dep_count; ++i) resolve_dependency(&b->deps[i], opt, &lock, &states[i], build_artifacts);
+    for (size_t i = 0; i < b->dep_count; ++i)
+        if (b->deps[i].kind != C_DEP_PKGCONFIG)
+            resolve_dependency(&b->deps[i], opt, &lock, &states[i], build_artifacts);
     save_lock(&lock);
 }
 
@@ -1097,7 +1099,7 @@ static void cmd_fetch(const Options *opt) {
 }
 
 static const char *dep_kind_name(C_DepKind kind) {
-    return kind == C_DEP_CMAKE ? "cmake" : kind == C_DEP_SOURCE ? "source" : "header";
+    return kind == C_DEP_PKGCONFIG ? "pkg-config" : kind == C_DEP_CMAKE ? "cmake" : kind == C_DEP_SOURCE ? "source" : "header";
 }
 
 static void cmd_deps(const Options *opt) {
@@ -1274,7 +1276,7 @@ static void usage(void) {
          "  c run [target] [--release] [-v] [-- args...]\n"
          "  c fetch\n"
          "  c update [dependency]\n"
-         "  c deps [tree|clean]\n"
+         "  c deps [tree|clean]\n"\n         "  c tree\n  c check [target]\n  c compdb [target]\n"
          "  c test [target]\n"
          "  c clean\n"
          "  c cache [stats|clean]\n"
