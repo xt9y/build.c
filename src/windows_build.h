@@ -89,7 +89,11 @@ static void resolve_dependency(C_Dependency *d, const Options *opt, LockFile *lo
 
 static void resolve_all(C_Build *b, const Options *opt, DepState states[]) {
     LockFile lock; load_lock(&lock);
-    for (size_t i = 0; i < b->dep_count; ++i) resolve_dependency(&b->deps[i], opt, &lock, &states[i]);
+    for (size_t i = 0; i < b->dep_count; ++i) {
+        if (b->deps[i].kind == C_DEP_PKGCONFIG)
+            die("pkg-config dependencies are currently unsupported on native Windows");
+        resolve_dependency(&b->deps[i], opt, &lock, &states[i]);
+    }
     save_lock(&lock);
 }
 
