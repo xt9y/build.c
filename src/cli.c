@@ -1225,6 +1225,15 @@ static void compiler_append_target_link_closure(C_Build *b, C_Target *owner, C_T
         die("target %s links non-library target %s", owner->name, dep->name);
     if (!graph_outputs[idx]) die("internal target graph error for %s", dep->name);
     c__push(&owner->ldflags, graph_outputs[idx]);
+#ifdef __APPLE__
+    if (dep->kind == C_TARGET_SHARED_LIBRARY) {
+        const char *rpath = "-Wl,-rpath,@loader_path";
+        bool exists = false;
+        for (size_t i = 0; i < owner->ldflags.count; ++i)
+            if (!strcmp(owner->ldflags.items[i], rpath)) exists = true;
+        if (!exists) c__push(&owner->ldflags, rpath);
+    }
+#endif
     for (size_t i = 0; i < dep->target_dep_count; ++i)
         compiler_append_target_link_closure(b, owner, dep->target_deps[i], graph_outputs, seen);
 }
