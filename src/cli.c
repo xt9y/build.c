@@ -35,7 +35,7 @@ static const char *compiler_ar(void) {
 static bool compiler_cpp_source(const char *path) {
     const char *ext = strrchr(path, '.');
     if (!ext) return false;
-    return !strcmp(ext, ".cpp") || !strcmp(ext, ".cc") || !strcmp(ext, ".cxx") || !strcmp(ext, ".mm");
+    return !strcmp(ext, ".cpp") || !strcmp(ext, ".cc") || !strcmp(ext, ".cxx") || !strcmp(ext, ".cppm") || !strcmp(ext, ".mm");
 }
 
 static bool compiler_c_standard_flag(const char *flag) {
@@ -460,6 +460,12 @@ static uint64_t compiler_command_cache_hash(const StrVec *cmd, const char *sourc
         if (!strcmp(arg, "-o") || !strcmp(arg, "-MF")) { if (i + 1 < cmd->count) ++i; continue; }
         if (!strcmp(arg, "-c") || !strcmp(arg, source)) continue;
         h = hash_update(h, arg, strlen(arg));
+        if (!strncmp(arg, "-fmodule-file=", 14)) {
+            const char *pcm = strrchr(arg, '=');
+            uint64_t content_hash = 0;
+            if (pcm && compiler_hash_file(pcm + 1, &content_hash))
+                h = hash_update(h, &content_hash, sizeof(content_hash));
+        }
         const char zero = '\0';
         h = hash_update(h, &zero, 1);
     }
@@ -697,7 +703,7 @@ static int compiler_language_kind(const char *path) {
     if (!ext) return 0;
     if (!strcmp(ext, ".mm")) return 3;
     if (!strcmp(ext, ".m")) return 2;
-    if (!strcmp(ext, ".cpp") || !strcmp(ext, ".cc") || !strcmp(ext, ".cxx")) return 1;
+    if (!strcmp(ext, ".cpp") || !strcmp(ext, ".cc") || !strcmp(ext, ".cxx") || !strcmp(ext, ".cppm")) return 1;
     return 0;
 }
 
@@ -1092,16 +1098,29 @@ static void compiler_run_generators(C_Target *t, const Options *opt) {
     }
 }
 
+#include "cpp_modules.h"
+
 static char *compiler_build_target(C_Build *b, C_Target *t, DepState states[], const Options *opt) {
     StrVec sources = {0}, compile_sources = {0}, objects = {0};
     compiler_run_generators(t, opt);
     expand_sources(t, b, states, &sources);
     if (sources.count == 0) die("target %s has no sources", t->name);
     compiler_profile_reset();
+    CppModuleGraph modules = cpp_module_prepare(&sources, b, t, states, opt);
     int unity_mode = t->unity_chunk ? t->unity_chunk : compiler_perf.unity;
+    if (modules.count && unity_mode != 0 && unity_mode != 1) {
+        note("MODULE", "unity disabled for named modules");
+        unity_mode = 1;
+    }
     uint64_t sig = target_signature(t, b, states, opt, &sources);
     uint64_t tool = compiler_tool_identity(opt->cc);
     sig = hash_update(sig, &tool, sizeof(tool));
+    for (size_t i = 0; i < modules.count; ++i) {
+        uint64_t pcm_hash = 0;
+        if (!compiler_hash_file_uncached(modules.units[i].pcm, &pcm_hash))
+            die("missing C++ module artifact %s", modules.units[i].name);
+        sig = hash_update(sig, &pcm_hash, sizeof(pcm_hash));
+    }
     sig = hash_update(sig, &unity_mode, sizeof(unity_mode));
     sig = hash_update(sig, &compiler_perf.fast_debug, sizeof(compiler_perf.fast_debug));
     sig = hash_update(sig, compiler_perf.linker, strlen(compiler_perf.linker));
@@ -1128,11 +1147,13 @@ static char *compiler_build_target(C_Build *b, C_Target *t, DepState states[], c
         c__copy(depf, sizeof(depf), obj); strcat(depf, ".d"); vec_push(&objects, obj);
 
         StrVec a = {0};
-        vec_push(&a, opt->cc); compiler_push_standard(&a, source);
+        vec_push(&a, modules.count && compiler_cpp_source(source) ? cpp_module_compiler() : opt->cc);
+        compiler_push_standard(&a, source);
         if (opt->release) vec_push(&a, "-O2");
         else if (compiler_perf.fast_debug) { vec_push(&a, "-O1"); vec_push(&a, "-g1"); }
         else { vec_push(&a, "-O0"); vec_push(&a, "-g"); }
         vec_push(&a, "-MMD"); vec_push(&a, "-MF"); vec_push(&a, depf);
+        cpp_module_append_flags(&a, &modules, source);
         compiler_append_target_compile_flags(&a, t, b, states, source);
         if (t->kind == C_TARGET_SHARED_LIBRARY) vec_push(&a, "-fPIC");
         vec_push(&a, "-c"); vec_push(&a, source); vec_push(&a, "-o"); vec_push(&a, obj);
@@ -1170,7 +1191,7 @@ static char *compiler_build_target(C_Build *b, C_Target *t, DepState states[], c
             for (size_t i = 0; i < objects.count; ++i) vec_push(&a, objects.items[i]);
             note("AR", "%s", output); double link_started = compiler_perf_now_ms(); if (run_process_atomic_output(&a, opt->verbose, output) != 0) die("archive failed"); link_ms = compiler_perf_now_ms() - link_started; vec_free(&a);
         } else {
-            StrVec a = {0}; vec_push(&a, opt->cc); compiler_append_linker(&a);
+            StrVec a = {0}; vec_push(&a, modules.count ? cpp_module_compiler() : opt->cc); compiler_append_linker(&a);
             if (t->kind == C_TARGET_SHARED_LIBRARY) {
 #ifdef __APPLE__
                 vec_push(&a, "-dynamiclib");
@@ -1185,7 +1206,7 @@ static char *compiler_build_target(C_Build *b, C_Target *t, DepState states[], c
     } else note("CACHED", "%s", t->name);
 
     compiler_profile_report(t->name, link_ms);
-    vec_free(&sources); vec_free(&compile_sources); vec_free(&objects); return output;
+    vec_free(&sources); vec_free(&compile_sources); vec_free(&objects); cpp_module_free(&modules); return output;
 }
 
 static size_t compiler_target_index(C_Build *b, C_Target *t) {
@@ -1562,6 +1583,7 @@ static const char *cli_step_name(const char *kind) {
     if (!strcmp(kind, "INIT")) return "init";
     if (!strcmp(kind, "CHECK")) return "check";
     if (!strcmp(kind, "COMPDB")) return "compdb";
+    if (!strcmp(kind, "MODULE")) return "module";
     return NULL;
 }
 
