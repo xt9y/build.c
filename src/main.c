@@ -728,8 +728,6 @@ static void read_registry_source(const char *path, char url[C_MAX_PATH], char co
     commit[0] = '\0';
     char line[2048];
     while (fgets(line, sizeof(line), f)) {
-        char *comment = strstr(line, "//");
-        if (comment) *comment = '\0';
         char key[32], value[C_MAX_PATH];
         if (sscanf(line, " %31[a-zA-Z_] = \"%1023[^\"]\"", key, value) != 2)
             continue;
