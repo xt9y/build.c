@@ -1004,9 +1004,31 @@ static void compiler_resolve_all(C_Build *b, const Options *opt, DepState states
     compiler_prepare_target_links(b, states);
 }
 
+static void compiler_append_public_usage(StrVec *a, const C_Target *t,
+                                         C_Build *b, bool seen[C_MAX_TARGETS]) {
+    ptrdiff_t idx = t - b->targets;
+    if (idx < 0 || (size_t)idx >= b->target_count) die("invalid target usage graph");
+    if (seen[idx]) return;
+    seen[idx] = true;
+    for (size_t i = 0; i < t->public_includes.count; ++i) {
+        char arg[PATH_MAX + 3];
+        snprintf(arg, sizeof(arg), "-I%s", t->public_includes.items[i]);
+        vec_push(a, arg);
+    }
+    for (size_t i = 0; i < t->public_defines.count; ++i) {
+        char arg[PATH_MAX + 3];
+        snprintf(arg, sizeof(arg), "-D%s", t->public_defines.items[i]);
+        vec_push(a, arg);
+    }
+    for (size_t i = 0; i < t->target_dep_count; ++i)
+        compiler_append_public_usage(a, t->target_deps[i], b, seen);
+}
+
 static void compiler_append_target_compile_flags(StrVec *a, const C_Target *t, C_Build *b, DepState states[], const char *source) {
     for (size_t i = 0; i < t->includes.count; ++i) { char x[PATH_MAX + 3]; snprintf(x, sizeof(x), "-I%s", t->includes.items[i]); vec_push(a, x); }
     for (size_t i = 0; i < t->defines.count; ++i) { char x[PATH_MAX + 3]; snprintf(x, sizeof(x), "-D%s", t->defines.items[i]); vec_push(a, x); }
+    bool seen[C_MAX_TARGETS] = {0};
+    compiler_append_public_usage(a, t, b, seen);
     compiler_push_source_flags(a, &t->cflags, source);
     for (size_t i = 0; i < t->dep_count; ++i) {
         C_Dependency *d = t->deps[i];
