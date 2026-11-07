@@ -85,7 +85,7 @@ static void cpp_module_scan(CppModule *unit, bool provider) {
 }
 
 static const char *cpp_module_find_std(const C_Target *t) {
-    if (t->std_module_source[0]) return t->std_module_source;
+    if (t->std_module_source[0] && strcmp(t->std_module_source, "@auto@")) return t->std_module_source;
     const char *env = getenv("C_STD_MODULE_SOURCE");
     if (env && *env) return env;
     static const char *paths[] = {
@@ -125,7 +125,8 @@ static void cpp_module_build(CppModuleGraph *graph, size_t index,
     if (!compiler_hash_file_uncached(unit->source, &source_hash))
         die("cannot hash module source: %s", unit->source);
     fingerprint = hash_update(fingerprint, &source_hash, sizeof(source_hash));
-    fingerprint = hash_update(fingerprint, cpp_module_compiler(), strlen(cpp_module_compiler()));
+    uint64_t compiler_identity = compiler_tool_identity(cpp_module_compiler());
+    fingerprint = hash_update(fingerprint, &compiler_identity, sizeof(compiler_identity));
     const char *standard = unit->standard ? "-std=c++23" : "-std=c++20";
     fingerprint = hash_update(fingerprint, standard, strlen(standard));
     for (size_t i = 0; i < target->cflags.count; ++i)
