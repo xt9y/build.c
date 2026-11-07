@@ -538,6 +538,8 @@ static void free_build(C_Build *b) {
         free_c_list(&t->sources);
         free_c_list(&t->includes);
         free_c_list(&t->defines);
+        free_c_list(&t->public_includes);
+        free_c_list(&t->public_defines);
         free_c_list(&t->cflags);
         free_c_list(&t->ldflags);
         free_c_list(&t->system_links);
