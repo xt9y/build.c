@@ -68,3 +68,22 @@ Set `C_STD_MODULE_SOURCE` to override automatic lookup. The standard library
 module needs an installed Clang/libc++ toolchain that provides `std.cppm`.
 
 Ordinary C/C++ targets without modules use the existing compilation path.
+
+## Public target usage
+
+For static or shared library targets, expose include directories and defines
+transitively to targets that link them:
+
+```c
+C_Target *lib = c_static_library(b, "lib");
+c_sources(lib, "src/lib/*.c");
+c_public_include(lib, "include");
+c_public_define(lib, "LIB_API=1");
+
+C_Target *app = c_executable(b, "app");
+c_sources(app, "src/app/*.c");
+c_link_target(app, lib);
+```
+
+`c_include` and `c_define` remain private to their targets. The public
+usage closure contributes to cache keys on macOS/Linux.
