@@ -83,3 +83,41 @@ jobs:
           export C_INCLUDE_DIR="$root/include"
           CXX=clang++ CC=clang "$root/build/c" build
           CXX=clang++ CC=clang "$root/build/c" run
+      - name: Public target usage smoke
+        shell: bash
+        run: |
+          set -eu
+          root="$PWD"
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          mkdir -p "$tmp/src" "$tmp/include"
+          cat > "$tmp/include/value.h" <<'EOF'
+          #ifndef EXPORTED_VALUE
+          #error public definition is not inherited
+          #endif
+          int answer(void);
+          EOF
+          cat > "$tmp/src/lib.c" <<'EOF'
+          #include "value.h"
+          int answer(void) { return EXPORTED_VALUE; }
+          EOF
+          cat > "$tmp/src/main.c" <<'EOF'
+          #include "value.h"
+          int main(void) { return answer() == 42 ? 0 : 1; }
+          EOF
+          cat > "$tmp/build.c" <<'EOF'
+          #include <cbuild.h>
+          void build(C_Build *b) {
+              C_Target *lib = c_static_library(b, "lib");
+              c_sources(lib, "src/lib.c");
+              c_public_include(lib, "include");
+              c_public_define(lib, "EXPORTED_VALUE=42");
+              C_Target *app = c_executable(b, "app");
+              c_sources(app, "src/main.c");
+              c_link_target(app, lib);
+          }
+          EOF
+          cd "$tmp"
+          export C_INCLUDE_DIR="$root/include"
+          "$root/build/c" build app
+          "$root/build/c" run app
