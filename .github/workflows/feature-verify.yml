@@ -11,10 +11,75 @@ jobs:
   smoke:
     name: C build and regression tests
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - name: Build
         run: make clean all
       - name: Test
         run: make test
+      - name: New command and dependency smoke
+        shell: bash
+        run: |
+          set -eu
+          root="$PWD"
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          mkdir -p "$tmp/project/src" "$tmp/local"
+          cat > "$tmp/local/value.c" <<'EOF'
+          int value(void) { return 42; }
+          EOF
+          cat > "$tmp/project/src/main.c" <<'EOF'
+          int value(void);
+          int main(void) { return value() == 42 ? 0 : 1; }
+          EOF
+          cat > "$tmp/project/build.c" <<'EOF'
+          #include <cbuild.h>
+          void build(C_Build *b) {
+              C_Dependency *lib = c_path(b, "local", "../local");
+              c_dep_source(lib);
+              c_dep_sources(lib, "*.c");
+              C_Target *app = c_executable(b, "app");
+              c_sources(app, "src/*.c");
+              c_use(app, lib);
+          }
+          EOF
+          cd "$tmp/project"
+          export C_INCLUDE_DIR="$root/include"
+          "$root/build/c" check
+          "$root/build/c" tree
+          "$root/build/c" compdb
+          grep -q 'main.c' compile_commands.json
+          "$root/build/c" build
+          "$root/build/c" run
+          "$root/build/c" build
+          grep -q 'local' "$tmp/project/c.lock" && { echo 'local dependency improperly locked'; exit 1; } || true
+      - name: C++ named module smoke
+        shell: bash
+        run: |
+          set -eu
+          root="$PWD"
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          mkdir -p "$tmp/src"
+          cat > "$tmp/src/value.cppm" <<'EOF'
+          export module value;
+          export int value() { return 42; }
+          EOF
+          cat > "$tmp/src/main.cpp" <<'EOF'
+          import value;
+          int main() { return value() == 42 ? 0 : 1; }
+          EOF
+          cat > "$tmp/build.c" <<'EOF'
+          #include <cbuild.h>
+          void build(C_Build *b) {
+              C_Target *app = c_executable(b, "app");
+              c_sources(app, "src/*.cppm");
+              c_sources(app, "src/*.cpp");
+              c_flag(app, "-std=c++20");
+          }
+          EOF
+          cd "$tmp"
+          export C_INCLUDE_DIR="$root/include"
+          CXX=clang++ CC=clang++ "$root/build/c" build
+          CXX=clang++ CC=clang++ "$root/build/c" run
