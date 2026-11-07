@@ -1302,6 +1302,107 @@ static void compiler_cmd_watch(const Options *opt) {
     }
 }
 
+
+/* Inspect a build without compiling sources or running project executables. */
+static void compiler_check_graph(C_Build *b, C_Target *t, unsigned char marks[]) {
+    size_t index = compiler_target_index(b, t);
+    if (marks[index] == 1) die("cyclic target dependency involving %s", t->name);
+    if (marks[index] == 2) return;
+    marks[index] = 1;
+    for (size_t i = 0; i < t->target_dep_count; ++i) {
+        C_Target *dep = t->target_deps[i];
+        if (dep->kind != C_TARGET_STATIC_LIBRARY && dep->kind != C_TARGET_SHARED_LIBRARY)
+            die("target %s links non-library target %s", t->name, dep->name);
+        compiler_check_graph(b, dep, marks);
+    }
+    marks[index] = 2;
+}
+
+static void compiler_cmd_check(const Options *opt) {
+    C_Build *b = alloc_build();
+    load_build(opt, b);
+    if (opt->target_name) (void)select_target(b, opt);
+    unsigned char marks[C_MAX_TARGETS] = {0};
+    for (size_t i = 0; i < b->target_count; ++i)
+        compiler_check_graph(b, &b->targets[i], marks);
+    size_t sources = 0;
+    for (size_t i = 0; i < b->target_count; ++i) {
+        C_Target *t = &b->targets[i];
+        if (t->generated_outputs.count != t->generated_inputs.count ||
+            t->generated_outputs.count != t->generated_commands.count)
+            die("target %s has an invalid generated-source description", t->name);
+        if (!t->sources.count && !t->dep_count && !t->generated_outputs.count)
+            die("target %s has no sources", t->name);
+        for (size_t j = 0; j < t->sources.count; ++j) {
+            const char *pattern = t->sources.items[j];
+            glob_t found = {0};
+            int rc = glob(pattern, 0, NULL, &found);
+            if (rc == GLOB_NOMATCH && t->generated_outputs.count) {
+                globfree(&found);
+                continue;
+            }
+            if (rc != 0) die("source pattern matched nothing or failed: %s", pattern);
+            sources += found.gl_pathc;
+            globfree(&found);
+        }
+    }
+    note("CHECK", "%zu targets, %zu dependencies, %zu source files",
+         b->target_count, b->dep_count, sources);
+    free_build(b);
+}
+
+/* Generate editor compile commands without compiling or linking a target. */
+static void compiler_cmd_compdb(const Options *opt) {
+    C_Build *b = alloc_build();
+    load_build(opt, b);
+    C_Target *selected = opt->target_name ? select_target(b, opt) : NULL;
+    DepState states[C_MAX_DEPS] = {0};
+    LockFile lock;
+    load_lock(&lock);
+    for (size_t i = 0; i < b->dep_count; ++i)
+        resolve_dependency(&b->deps[i], opt, &lock, &states[i], false);
+    save_lock(&lock);
+    expand_dependency_paths(b, states);
+
+    char cwd[PATH_MAX];
+    if (!getcwd(cwd, sizeof(cwd))) die("getcwd failed");
+    FILE *db = fopen("compile_commands.json", "w");
+    if (!db) die("cannot write compile_commands.json: %s", strerror(errno));
+    bool first = true;
+    size_t total = 0;
+    fputs("[\n", db);
+    for (size_t i = 0; i < b->target_count; ++i) {
+        C_Target *t = &b->targets[i];
+        if (selected && selected != t) continue;
+        StrVec sources = {0};
+        expand_sources(t, b, states, &sources);
+        for (size_t j = 0; j < sources.count; ++j) {
+            const char *src = sources.items[j];
+            char objdir[PATH_MAX], obj[PATH_MAX];
+            snprintf(objdir, sizeof(objdir), "build/.compdb/%s", t->name);
+            object_path(objdir, src, obj);
+            StrVec a = {0};
+            vec_push(&a, opt->cc);
+            compiler_push_standard(&a, src);
+            vec_push(&a, opt->release ? "-O2" : "-O0");
+            if (!opt->release) vec_push(&a, "-g");
+            compiler_append_target_compile_flags(&a, t, b, states, src);
+            vec_push(&a, "-c");
+            vec_push(&a, src);
+            vec_push(&a, "-o");
+            vec_push(&a, obj);
+            write_compile_command(db, &first, &a, src, cwd);
+            vec_free(&a);
+            ++total;
+        }
+        vec_free(&sources);
+    }
+    fputs("\n]\n", db);
+    if (fclose(db) != 0) die("cannot close compile_commands.json");
+    note("COMPDB", "compile_commands.json (%zu entries)", total);
+    free_build(b);
+}
+
 static int compiler_dispatch(int argc, char **argv) {
     compiler_perf_defaults();
     int filtered_argc = 0;
@@ -1313,6 +1414,9 @@ static int compiler_dispatch(int argc, char **argv) {
     else if (!strcmp(opt.command, "watch")) compiler_cmd_watch(&opt);
     else if (!strcmp(opt.command, "test")) compiler_cmd_test(&opt);
     else if (!strcmp(opt.command, "doctor")) compiler_cmd_doctor(&opt);
+    else if (!strcmp(opt.command, "check")) compiler_cmd_check(&opt);
+    else if (!strcmp(opt.command, "compdb")) compiler_cmd_compdb(&opt);
+    else if (!strcmp(opt.command, "tree")) { Options tree = opt; tree.target_name = "tree"; cmd_deps(&tree); }
     else rc = c_legacy_main(filtered_argc, filtered_argv);
     free(filtered_argv);
     return rc;
@@ -1321,6 +1425,7 @@ static int compiler_dispatch(int argc, char **argv) {
 static bool cli_is_command(const char *s) {
     static const char *commands[] = {
         "init", "build", "run", "watch", "fetch", "update", "deps", "test",
+        "check", "tree", "compdb",
         "clean", "cache", "doctor", "help", "--help", "-h",
         "version", "--version"
     };
@@ -1333,7 +1438,7 @@ static bool cli_is_version_or_help(const char *s) {
 }
 
 static bool cli_is_action(const char *s) {
-    return !strcmp(s, "init") || !strcmp(s, "build") || !strcmp(s, "run") || !strcmp(s, "watch") || !strcmp(s, "fetch") || !strcmp(s, "update") || !strcmp(s, "test") || !strcmp(s, "clean") || !strcmp(s, "cache");
+    return !strcmp(s, "init") || !strcmp(s, "build") || !strcmp(s, "run") || !strcmp(s, "watch") || !strcmp(s, "check") || !strcmp(s, "compdb") || !strcmp(s, "fetch") || !strcmp(s, "update") || !strcmp(s, "test") || !strcmp(s, "clean") || !strcmp(s, "cache");
 }
 
 static bool cli_jobs_option(const char *arg) {
@@ -1400,6 +1505,8 @@ static const char *cli_step_name(const char *kind) {
     if (!strcmp(kind, "WATCH")) return "watch";
     if (!strcmp(kind, "CLEAN")) return "clean";
     if (!strcmp(kind, "INIT")) return "init";
+    if (!strcmp(kind, "CHECK")) return "check";
+    if (!strcmp(kind, "COMPDB")) return "compdb";
     return NULL;
 }
 
