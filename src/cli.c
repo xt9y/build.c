@@ -796,7 +796,7 @@ static void compiler_build_dependency(const C_Dependency *d, const Options *opt,
 
     char library[PATH_MAX];
     compiler_dep_library(d, state, library);
-    if (file_exists(library) && ready_marker_matches(library, "artifact")) {
+    if (!d->local_path && file_exists(library) && ready_marker_matches(library, "artifact")) {
         note("CACHED", "%s", d->name);
         return;
     }
@@ -860,7 +860,8 @@ static void compiler_build_dependency(const C_Dependency *d, const Options *opt,
     vec_push(&ar, compiler_ar()); vec_push(&ar, "rcs"); vec_push(&ar, library);
     for (size_t i = 0; i < objects.count; ++i) vec_push(&ar, objects.items[i]);
     note("AR", "%s", library);
-    if (run_process_atomic_output(&ar, opt->verbose, library) != 0) die("dependency archive failed: %s", d->name);
+    if (compiled || cache_hits || !file_exists(library))
+        if (run_process_atomic_output(&ar, opt->verbose, library) != 0) die("dependency archive failed: %s", d->name);
     vec_free(&ar); vec_free(&sources); vec_free(&compile_sources); vec_free(&objects);
 }
 
