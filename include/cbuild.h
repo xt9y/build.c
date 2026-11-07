@@ -75,6 +75,9 @@ typedef struct C_Dependency {
     C_DepKind kind;
     int asset_only; /* opted-in: selected mappings may use sparse Git checkout */
     int local_path; /* local source directory; not written to c.lock */
+    int registry; /* resolve pinned Git source from a package registry */
+    char registry_package[C_MAX_NAME];
+    char registry_version[C_MAX_NAME];
     C_StringList links;          /* internal paired source/destination storage for c_dep_asset */
     C_StringList include_dirs;
     C_StringList source_patterns;
@@ -300,6 +303,27 @@ static inline C_Dependency *c_path(C_Build *b, const char *name, const char *pat
     c__copy(d->name, sizeof(d->name), name);
     c__copy(d->git, sizeof(d->git), path);
     d->local_path = 1;
+    d->kind = C_DEP_HEADER_ONLY;
+    return d;
+}
+
+/* The registry supplies an immutable upstream Git commit.
+ * Build settings remain in build.c via c_dep_source()/c_dep_cbuild(). */
+static inline C_Dependency *c_registry(C_Build *b, const char *name,
+                                       const char *package, const char *version) {
+    c__check_dep_name(b, name);
+    c__require_name(package, "registry package");
+    c__require_name(version, "registry version");
+    if (strchr(package, '/') || strchr(package, '\\') || !strcmp(package, "..") ||
+        strchr(version, '/') || strchr(version, '\\') || strstr(version, ".."))
+        c__fatal("invalid registry package or version");
+    if (b->dep_count >= C_MAX_DEPS) c__fatal("too many dependencies");
+    C_Dependency *d = &b->deps[b->dep_count++];
+    memset(d, 0, sizeof(*d));
+    c__copy(d->name, sizeof(d->name), name);
+    c__copy(d->registry_package, sizeof(d->registry_package), package);
+    c__copy(d->registry_version, sizeof(d->registry_version), version);
+    d->registry = 1;
     d->kind = C_DEP_HEADER_ONLY;
     return d;
 }
