@@ -93,6 +93,8 @@ typedef struct C_Target {
     C_StringList sources;
     C_StringList includes;
     C_StringList defines;
+    C_StringList public_includes; /* exported to target consumers */
+    C_StringList public_defines;
     C_StringList cflags;
     C_StringList ldflags;
     C_StringList system_links;
@@ -216,6 +218,15 @@ static inline void c_default_target(C_Build *b, C_Target *target) {
  * Example: c_sources(target, "@raylib@/src/rcore.c"); */
 static inline void c_sources(C_Target *t, const char *pattern) { if (!t) c__fatal("c_sources received a null target"); c__push(&t->sources, pattern); }
 static inline void c_include(C_Target *t, const char *path) { if (!t) c__fatal("c_include received a null target"); c__push(&t->includes, path); }
+/* Public usage requirements are inherited by downstream target dependencies. */
+static inline void c_public_include(C_Target *t, const char *path) {
+    if (!t) c__fatal("c_public_include received a null target");
+    c__push(&t->public_includes, path);
+}
+static inline void c_public_define(C_Target *t, const char *value) {
+    if (!t) c__fatal("c_public_define received a null target");
+    c__push(&t->public_defines, value);
+}
 static inline void c_define(C_Target *t, const char *value) { if (!t) c__fatal("c_define received a null target"); c__push(&t->defines, value); }
 static inline void c_flag(C_Target *t, const char *value) { if (!t) c__fatal("c_flag received a null target"); c__push(&t->cflags, value); }
 static inline void c_link_flag(C_Target *t, const char *value) { if (!t) c__fatal("c_link_flag received a null target"); c__push(&t->ldflags, value); }
