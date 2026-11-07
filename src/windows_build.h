@@ -30,6 +30,19 @@ static bool checkout_path_valid(const char *path) {
 }
 
 static void resolve_dependency(C_Dependency *d, const Options *opt, LockFile *lock, DepState *s) {
+    if (d->local_path) {
+        if (!_fullpath(s->source, d->git, PATH_MAX) || !is_dir(s->source))
+            die("local dependency '%s' directory not found: %s", d->name, d->git);
+        char cache[PATH_MAX], root[PATH_MAX], key[17], name[C_MAX_NAME + 32];
+        cache_root(cache);
+        path_join(root, cache, "local");
+        hash_hex(hash_string(s->source), key);
+        snprintf(name, sizeof(name), "%s-%s", d->name, key);
+        path_join(s->package, root, name);
+        mkdir_p(s->package);
+        snprintf(s->resolved, sizeof(s->resolved), "local");
+        return;
+    }
     char cache[PATH_MAX], gitroot[PATH_MAX], srcroot[PATH_MAX], pkgroot[PATH_MAX];
     cache_root(cache); path_join(gitroot, cache, "git"); path_join(srcroot, cache, "src"); path_join(pkgroot, cache, "pkg");
     mkdir_p(gitroot); mkdir_p(srcroot); mkdir_p(pkgroot);
@@ -150,7 +163,7 @@ static void build_source_dependency(C_Dependency *d, const Options *opt, DepStat
     if (d->kind != C_DEP_SOURCE) return;
     if (!d->source_patterns.count) die("source dependency %s has no sources", d->name);
     char lib[PATH_MAX]; path_join(lib, s->package, "dependency.a"); snprintf(s->artifact, PATH_MAX, "%s", lib);
-    if (file_exists(lib)) return;
+    if (file_exists(lib) && !d->local_path) return;
     char root[PATH_MAX]; dep_root(d, s, root); char objdir[PATH_MAX]; path_join(objdir, s->package, ".objs"); mkdir_p(objdir);
     StrVec objects = {0};
     for (size_t pi = 0; pi < d->source_patterns.count; ++pi) {
