@@ -29,7 +29,52 @@ static bool checkout_path_valid(const char *path) {
     }
 }
 
+static void windows_read_registry_source(const char *path, char url[C_MAX_PATH], char commit[80]) {
+    FILE *f = fopen(path, "r");
+    if (!f) die("registry source not found: %s", path);
+    url[0] = '\0';
+    commit[0] = '\0';
+    char line[2048];
+    while (fgets(line, sizeof(line), f)) {
+        char key[32], value[C_MAX_PATH];
+        if (sscanf(line, " %31[a-zA-Z_] = \"%1023[^\"]\"", key, value) != 2) continue;
+        if (!strcmp(key, "git")) snprintf(url, C_MAX_PATH, "%s", value);
+        else if (!strcmp(key, "commit")) snprintf(commit, 80, "%s", value);
+    }
+    fclose(f);
+    if (strncmp(url, "https://", 8)) die("registry source must use an https:// git URL: %s", path);
+    if (strlen(commit) != 40) die("registry commit must be a 40-character hash: %s", path);
+    for (const char *p = commit; *p; ++p)
+        if (!isxdigit((unsigned char)*p)) die("invalid registry commit: %s", path);
+}
+
 static void resolve_dependency(C_Dependency *d, const Options *opt, LockFile *lock, DepState *s) {
+    if (d->registry) {
+        C_Dependency index = {0};
+        snprintf(index.name, sizeof(index.name), "__c_registry__");
+        const char *configured = getenv("C_REGISTRY_URL");
+        snprintf(index.git, sizeof(index.git), "%s",
+                 configured && *configured ? configured : "https://github.com/FloofyPlasma/smelt-registry");
+        if (strncmp(index.git, "https://", 8)) die("C_REGISTRY_URL must be an https:// git URL");
+        snprintf(index.ref, sizeof(index.ref), "HEAD");
+        index.kind = C_DEP_HEADER_ONLY;
+        DepState registry_state = {0};
+        resolve_dependency(&index, opt, lock, &registry_state);
+
+        char spec[PATH_MAX], upstream[C_MAX_PATH], commit[80];
+        int n = snprintf(spec, sizeof(spec), "%s/packages/%s/%s/source.smelt",
+                         registry_state.source, d->registry_package, d->registry_version);
+        if (n < 0 || n >= (int)sizeof(spec)) die("registry package path is too long");
+        windows_read_registry_source(spec, upstream, commit);
+        C_Dependency pinned = *d;
+        pinned.registry = 0;
+        snprintf(pinned.git, sizeof(pinned.git), "%s", upstream);
+        snprintf(pinned.ref, sizeof(pinned.ref), "%s", commit);
+        resolve_dependency(&pinned, opt, lock, s);
+        snprintf(d->git, sizeof(d->git), "%s", pinned.git);
+        snprintf(d->ref, sizeof(d->ref), "%s", pinned.ref);
+        return;
+    }
     if (d->local_path) {
         if (!_fullpath(s->source, d->git, PATH_MAX) || !is_dir(s->source))
             die("local dependency '%s' directory not found: %s", d->name, d->git);
