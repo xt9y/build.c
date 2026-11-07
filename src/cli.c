@@ -864,12 +864,57 @@ static void compiler_build_dependency(const C_Dependency *d, const Options *opt,
     vec_free(&ar); vec_free(&sources); vec_free(&compile_sources); vec_free(&objects);
 }
 
+
+/* pkg-config supplies flags as shell-style words, not as one compiler argument. */
+static void compiler_split_flags(StrVec *out, const char *text) {
+    char word[PATH_MAX * 2];
+    size_t size = 0;
+    char quote = 0;
+    for (const char *p = text;; ++p) {
+        char ch = *p;
+        if (!ch || (!quote && (ch == ' ' || ch == '\t' || ch == '\n'))) {
+            if (size) { word[size] = '\0'; vec_push(out, word); size = 0; }
+            if (!ch) break;
+            continue;
+        }
+        if (ch == '\\' && p[1]) { ch = *++p; }
+        else if (ch == '\'' || ch == '"') {
+            if (!quote) { quote = ch; continue; }
+            if (quote == ch) { quote = 0; continue; }
+        }
+        if (size + 1 >= sizeof(word)) die("pkg-config argument is too long");
+        word[size++] = ch;
+    }
+    if (quote) die("unterminated pkg-config argument");
+}
+
+static void compiler_pkg_config_query(const C_Dependency *d, const char *flag, StrVec *out) {
+    StrVec command = {0};
+    vec_push(&command, "pkg-config");
+    vec_push(&command, flag);
+    vec_push(&command, d->ref);
+    char *result = capture_process(&command, NULL);
+    vec_free(&command);
+    if (!result) die("pkg-config %s failed for '%s' (%s)", flag, d->name, d->ref);
+    compiler_split_flags(out, result);
+    free(result);
+}
+
+static void compiler_resolve_pkg_config(C_Dependency *d) {
+    compiler_pkg_config_query(d, "--cflags", (StrVec *)&d->compile_flags);
+    compiler_pkg_config_query(d, "--libs", (StrVec *)&d->links);
+}
+
 static void compiler_prepare_target_links(C_Build *b, DepState states[]) {
     for (size_t ti = 0; ti < b->target_count; ++ti) {
         C_Target *t = &b->targets[ti];
         C_StringList ordered = {0};
         for (size_t i = 0; i < t->dep_count; ++i) {
             C_Dependency *d = t->deps[i];
+            if (d->kind == C_DEP_PKGCONFIG) {
+                for (size_t j = 0; j < d->links.count; ++j) c__push(&ordered, d->links.items[j]);
+                continue;
+            }
             if (d->kind != C_DEP_SOURCE) continue;
             ptrdiff_t idx = d - b->deps;
             if (idx < 0 || (size_t)idx >= b->dep_count) die("target %s has invalid dependency", t->name);
@@ -894,6 +939,7 @@ static void compiler_resolve_all(C_Build *b, const Options *opt, DepState states
     load_lock(&lock);
     for (size_t i = 0; i < b->dep_count; ++i) {
         C_Dependency *d = &b->deps[i];
+        if (d->kind == C_DEP_PKGCONFIG) { compiler_resolve_pkg_config(d); continue; }
         if (d->kind == C_DEP_RESERVED) die("external build-system dependencies are not supported; use c_dep_source()");
         resolve_dependency(d, opt, &lock, &states[i], false);
     }
@@ -957,6 +1003,11 @@ static void compiler_append_target_compile_flags(StrVec *a, const C_Target *t, C
     compiler_push_source_flags(a, &t->cflags, source);
     for (size_t i = 0; i < t->dep_count; ++i) {
         C_Dependency *d = t->deps[i];
+        if (d->kind == C_DEP_PKGCONFIG) {
+            for (size_t j = 0; j < d->compile_flags.count; ++j)
+                vec_push(a, d->compile_flags.items[j]);
+            continue;
+        }
         ptrdiff_t dep_index = d - b->deps;
         if (dep_index < 0 || (size_t)dep_index >= b->dep_count) die("target %s has invalid dependency", t->name);
         DepState *s = &states[dep_index];
@@ -1359,8 +1410,11 @@ static void compiler_cmd_compdb(const Options *opt) {
     DepState states[C_MAX_DEPS] = {0};
     LockFile lock;
     load_lock(&lock);
-    for (size_t i = 0; i < b->dep_count; ++i)
-        resolve_dependency(&b->deps[i], opt, &lock, &states[i], false);
+    for (size_t i = 0; i < b->dep_count; ++i) {
+        C_Dependency *d = &b->deps[i];
+        if (d->kind == C_DEP_PKGCONFIG) { compiler_resolve_pkg_config(d); continue; }
+        resolve_dependency(d, opt, &lock, &states[i], false);
+    }
     save_lock(&lock);
     expand_dependency_paths(b, states);
 
