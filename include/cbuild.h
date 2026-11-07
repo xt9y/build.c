@@ -47,7 +47,8 @@ typedef enum C_DepKind {
     C_DEP_HEADER_ONLY = 0,
     C_DEP_RESERVED = 1,
     C_DEP_SOURCE = 2,
-    C_DEP_CBUILD = 3
+    C_DEP_CBUILD = 3,
+    C_DEP_PKGCONFIG = 4
 } C_DepKind;
 
 /* CMake dependencies occupy the 1.x reserved dependency slot. */
@@ -277,6 +278,19 @@ static inline C_Dependency *c_git(C_Build *b, const char *name, const char *git,
     c__copy(d->git, sizeof(d->git), git);
     c__copy(d->ref, sizeof(d->ref), (ref && ref[0]) ? ref : "HEAD");
     d->kind = C_DEP_HEADER_ONLY;
+    return d;
+}
+
+/* Link flags and include paths are resolved using pkg-config at build time. */
+static inline C_Dependency *c_pkg_config(C_Build *b, const char *name, const char *package) {
+    c__check_dep_name(b, name);
+    c__require_name(package, "pkg-config package");
+    if (b->dep_count >= C_MAX_DEPS) c__fatal("too many dependencies");
+    C_Dependency *d = &b->deps[b->dep_count++];
+    memset(d, 0, sizeof(*d));
+    c__copy(d->name, sizeof(d->name), name);
+    c__copy(d->ref, sizeof(d->ref), package);
+    d->kind = C_DEP_PKGCONFIG;
     return d;
 }
 
