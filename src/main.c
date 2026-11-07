@@ -720,6 +720,19 @@ static bool ensure_git_mirror(const C_Dependency *d, const Options *opt, const c
 }
 
 static void resolve_dependency(const C_Dependency *d, const Options *opt, LockFile *lock, DepState *state, bool build_artifacts) {
+    if (d->local_path) {
+        if (!realpath(d->git, state->source) || !is_dir(state->source))
+            die("local dependency '%s' directory not found: %s", d->name, d->git);
+        char cache[PATH_MAX], pkgroot[PATH_MAX], key[17], name[C_MAX_NAME + 32];
+        cache_root(cache);
+        path_join(pkgroot, cache, "local");
+        hash_hex(state->source, key);
+        snprintf(name, sizeof(name), "%s-%s", d->name, key);
+        path_join(state->package, pkgroot, name);
+        mkdir_p(state->package);
+        c__copy(state->resolved, sizeof(state->resolved), "local");
+        return;
+    }
     LockEntry *e = lock_for(lock, d);
     char mirror[PATH_MAX];
     bool fetched = ensure_git_mirror(d, opt, e ? e->resolved : d->ref, mirror);
