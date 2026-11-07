@@ -81,5 +81,5 @@ jobs:
           EOF
           cd "$tmp"
           export C_INCLUDE_DIR="$root/include"
-          CXX=clang++ CC=clang++ "$root/build/c" build
-          CXX=clang++ CC=clang++ "$root/build/c" run
+          CXX=clang++ CC=clang "$root/build/c" build
+          CXX=clang++ CC=clang "$root/build/c" run
