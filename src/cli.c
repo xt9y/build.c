@@ -858,7 +858,7 @@ static void compiler_build_dependency(const C_Dependency *d, const Options *opt,
         else if (prep == COMPILER_PREP_CACHE) ++cache_hits;
     }
     if (cache_hits) note("CACHED", "%zu object%s", cache_hits, cache_hits == 1 ? "" : "s");
-    compiler_execute_tasks(tasks, task_count, opt, "dependency compile failed");
+    size_t compiled = compiler_execute_tasks(tasks, task_count, opt, "dependency compile failed");
     for (size_t i = 0; i < task_count; ++i) compiler_task_free(&tasks[i]);
     free(tasks);
 
