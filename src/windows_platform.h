@@ -488,6 +488,7 @@ static void free_build(C_Build *b) {
     for (size_t i = 0; i < b->target_count; ++i) {
         C_Target *t = &b->targets[i];
         free_list(&t->sources); free_list(&t->includes); free_list(&t->defines); free_list(&t->cflags);
+        free_list(&t->public_includes); free_list(&t->public_defines);
         free_list(&t->ldflags); free_list(&t->system_links); free_list(&t->frameworks);
         free_list(&t->generated_outputs); free_list(&t->generated_inputs); free_list(&t->generated_commands);
     }

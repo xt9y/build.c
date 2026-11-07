@@ -35,7 +35,7 @@ static const char *compiler_ar(void) {
 static bool compiler_cpp_source(const char *path) {
     const char *ext = strrchr(path, '.');
     if (!ext) return false;
-    return !strcmp(ext, ".cpp") || !strcmp(ext, ".cc") || !strcmp(ext, ".cxx") || !strcmp(ext, ".mm");
+    return !strcmp(ext, ".cpp") || !strcmp(ext, ".cc") || !strcmp(ext, ".cxx") || !strcmp(ext, ".cppm") || !strcmp(ext, ".mm");
 }
 
 static bool compiler_c_standard_flag(const char *flag) {
@@ -460,6 +460,12 @@ static uint64_t compiler_command_cache_hash(const StrVec *cmd, const char *sourc
         if (!strcmp(arg, "-o") || !strcmp(arg, "-MF")) { if (i + 1 < cmd->count) ++i; continue; }
         if (!strcmp(arg, "-c") || !strcmp(arg, source)) continue;
         h = hash_update(h, arg, strlen(arg));
+        if (!strncmp(arg, "-fmodule-file=", 14)) {
+            const char *pcm = strrchr(arg, '=');
+            uint64_t content_hash = 0;
+            if (pcm && compiler_hash_file(pcm + 1, &content_hash))
+                h = hash_update(h, &content_hash, sizeof(content_hash));
+        }
         const char zero = '\0';
         h = hash_update(h, &zero, 1);
     }
@@ -697,7 +703,7 @@ static int compiler_language_kind(const char *path) {
     if (!ext) return 0;
     if (!strcmp(ext, ".mm")) return 3;
     if (!strcmp(ext, ".m")) return 2;
-    if (!strcmp(ext, ".cpp") || !strcmp(ext, ".cc") || !strcmp(ext, ".cxx")) return 1;
+    if (!strcmp(ext, ".cpp") || !strcmp(ext, ".cc") || !strcmp(ext, ".cxx") || !strcmp(ext, ".cppm")) return 1;
     return 0;
 }
 
@@ -796,7 +802,7 @@ static void compiler_build_dependency(const C_Dependency *d, const Options *opt,
 
     char library[PATH_MAX];
     compiler_dep_library(d, state, library);
-    if (file_exists(library) && ready_marker_matches(library, "artifact")) {
+    if (!d->local_path && file_exists(library) && ready_marker_matches(library, "artifact")) {
         note("CACHED", "%s", d->name);
         return;
     }
@@ -852,7 +858,7 @@ static void compiler_build_dependency(const C_Dependency *d, const Options *opt,
         else if (prep == COMPILER_PREP_CACHE) ++cache_hits;
     }
     if (cache_hits) note("CACHED", "%zu object%s", cache_hits, cache_hits == 1 ? "" : "s");
-    compiler_execute_tasks(tasks, task_count, opt, "dependency compile failed");
+    size_t compiled = compiler_execute_tasks(tasks, task_count, opt, "dependency compile failed");
     for (size_t i = 0; i < task_count; ++i) compiler_task_free(&tasks[i]);
     free(tasks);
 
@@ -860,8 +866,50 @@ static void compiler_build_dependency(const C_Dependency *d, const Options *opt,
     vec_push(&ar, compiler_ar()); vec_push(&ar, "rcs"); vec_push(&ar, library);
     for (size_t i = 0; i < objects.count; ++i) vec_push(&ar, objects.items[i]);
     note("AR", "%s", library);
-    if (run_process_atomic_output(&ar, opt->verbose, library) != 0) die("dependency archive failed: %s", d->name);
+    if (compiled || cache_hits || !file_exists(library))
+        if (run_process_atomic_output(&ar, opt->verbose, library) != 0) die("dependency archive failed: %s", d->name);
     vec_free(&ar); vec_free(&sources); vec_free(&compile_sources); vec_free(&objects);
+}
+
+
+/* pkg-config supplies flags as shell-style words, not as one compiler argument. */
+static void compiler_split_flags(C_StringList *out, const char *text) {
+    char word[PATH_MAX * 2];
+    size_t size = 0;
+    char quote = 0;
+    for (const char *p = text;; ++p) {
+        char ch = *p;
+        if (!ch || (!quote && (ch == ' ' || ch == '\t' || ch == '\n'))) {
+            if (size) { word[size] = '\0'; c__push(out, word); size = 0; }
+            if (!ch) break;
+            continue;
+        }
+        if (ch == '\\' && p[1]) { ch = *++p; }
+        else if (ch == '\'' || ch == '"') {
+            if (!quote) { quote = ch; continue; }
+            if (quote == ch) { quote = 0; continue; }
+        }
+        if (size + 1 >= sizeof(word)) die("pkg-config argument is too long");
+        word[size++] = ch;
+    }
+    if (quote) die("unterminated pkg-config argument");
+}
+
+static void compiler_pkg_config_query(const C_Dependency *d, const char *flag, C_StringList *out) {
+    StrVec command = {0};
+    vec_push(&command, "pkg-config");
+    vec_push(&command, flag);
+    vec_push(&command, d->ref);
+    char *result = capture_process(&command, NULL);
+    vec_free(&command);
+    if (!result) die("pkg-config %s failed for '%s' (%s)", flag, d->name, d->ref);
+    compiler_split_flags(out, result);
+    free(result);
+}
+
+static void compiler_resolve_pkg_config(C_Dependency *d) {
+    compiler_pkg_config_query(d, "--cflags", &d->compile_flags);
+    compiler_pkg_config_query(d, "--libs", &d->links);
 }
 
 static void compiler_prepare_target_links(C_Build *b, DepState states[]) {
@@ -870,6 +918,10 @@ static void compiler_prepare_target_links(C_Build *b, DepState states[]) {
         C_StringList ordered = {0};
         for (size_t i = 0; i < t->dep_count; ++i) {
             C_Dependency *d = t->deps[i];
+            if (d->kind == C_DEP_PKGCONFIG) {
+                for (size_t j = 0; j < d->links.count; ++j) c__push(&ordered, d->links.items[j]);
+                continue;
+            }
             if (d->kind != C_DEP_SOURCE) continue;
             ptrdiff_t idx = d - b->deps;
             if (idx < 0 || (size_t)idx >= b->dep_count) die("target %s has invalid dependency", t->name);
@@ -894,6 +946,7 @@ static void compiler_resolve_all(C_Build *b, const Options *opt, DepState states
     load_lock(&lock);
     for (size_t i = 0; i < b->dep_count; ++i) {
         C_Dependency *d = &b->deps[i];
+        if (d->kind == C_DEP_PKGCONFIG) { compiler_resolve_pkg_config(d); continue; }
         if (d->kind == C_DEP_RESERVED) die("external build-system dependencies are not supported; use c_dep_source()");
         resolve_dependency(d, opt, &lock, &states[i], false);
     }
@@ -951,12 +1004,39 @@ static void compiler_resolve_all(C_Build *b, const Options *opt, DepState states
     compiler_prepare_target_links(b, states);
 }
 
+static void compiler_append_public_usage(StrVec *a, const C_Target *t,
+                                         C_Build *b, bool seen[C_MAX_TARGETS]) {
+    ptrdiff_t idx = t - b->targets;
+    if (idx < 0 || (size_t)idx >= b->target_count) die("invalid target usage graph");
+    if (seen[idx]) return;
+    seen[idx] = true;
+    for (size_t i = 0; i < t->public_includes.count; ++i) {
+        char arg[PATH_MAX + 3];
+        snprintf(arg, sizeof(arg), "-I%s", t->public_includes.items[i]);
+        vec_push(a, arg);
+    }
+    for (size_t i = 0; i < t->public_defines.count; ++i) {
+        char arg[PATH_MAX + 3];
+        snprintf(arg, sizeof(arg), "-D%s", t->public_defines.items[i]);
+        vec_push(a, arg);
+    }
+    for (size_t i = 0; i < t->target_dep_count; ++i)
+        compiler_append_public_usage(a, t->target_deps[i], b, seen);
+}
+
 static void compiler_append_target_compile_flags(StrVec *a, const C_Target *t, C_Build *b, DepState states[], const char *source) {
     for (size_t i = 0; i < t->includes.count; ++i) { char x[PATH_MAX + 3]; snprintf(x, sizeof(x), "-I%s", t->includes.items[i]); vec_push(a, x); }
     for (size_t i = 0; i < t->defines.count; ++i) { char x[PATH_MAX + 3]; snprintf(x, sizeof(x), "-D%s", t->defines.items[i]); vec_push(a, x); }
+    bool seen[C_MAX_TARGETS] = {0};
+    compiler_append_public_usage(a, t, b, seen);
     compiler_push_source_flags(a, &t->cflags, source);
     for (size_t i = 0; i < t->dep_count; ++i) {
         C_Dependency *d = t->deps[i];
+        if (d->kind == C_DEP_PKGCONFIG) {
+            for (size_t j = 0; j < d->compile_flags.count; ++j)
+                vec_push(a, d->compile_flags.items[j]);
+            continue;
+        }
         ptrdiff_t dep_index = d - b->deps;
         if (dep_index < 0 || (size_t)dep_index >= b->dep_count) die("target %s has invalid dependency", t->name);
         DepState *s = &states[dep_index];
@@ -1040,16 +1120,38 @@ static void compiler_run_generators(C_Target *t, const Options *opt) {
     }
 }
 
+#include "cpp_modules.h"
+
 static char *compiler_build_target(C_Build *b, C_Target *t, DepState states[], const Options *opt) {
     StrVec sources = {0}, compile_sources = {0}, objects = {0};
     compiler_run_generators(t, opt);
     expand_sources(t, b, states, &sources);
     if (sources.count == 0) die("target %s has no sources", t->name);
     compiler_profile_reset();
+    CppModuleGraph modules = cpp_module_prepare(&sources, b, t, states, opt);
     int unity_mode = t->unity_chunk ? t->unity_chunk : compiler_perf.unity;
+    if (modules.count && unity_mode != 0 && unity_mode != 1) {
+        note("MODULE", "unity disabled for named modules");
+        unity_mode = 1;
+    }
     uint64_t sig = target_signature(t, b, states, opt, &sources);
+    StrVec public_usage = {0};
+    bool usage_visited[C_MAX_TARGETS] = {0};
+    compiler_append_public_usage(&public_usage, t, b, usage_visited);
+    for (size_t i = 0; i < public_usage.count; ++i) {
+        sig = hash_update(sig, public_usage.items[i], strlen(public_usage.items[i]));
+        const char separator = '\0';
+        sig = hash_update(sig, &separator, 1);
+    }
+    vec_free(&public_usage);
     uint64_t tool = compiler_tool_identity(opt->cc);
     sig = hash_update(sig, &tool, sizeof(tool));
+    for (size_t i = 0; i < modules.count; ++i) {
+        uint64_t pcm_hash = 0;
+        if (!compiler_hash_file_uncached(modules.units[i].pcm, &pcm_hash))
+            die("missing C++ module artifact %s", modules.units[i].name);
+        sig = hash_update(sig, &pcm_hash, sizeof(pcm_hash));
+    }
     sig = hash_update(sig, &unity_mode, sizeof(unity_mode));
     sig = hash_update(sig, &compiler_perf.fast_debug, sizeof(compiler_perf.fast_debug));
     sig = hash_update(sig, compiler_perf.linker, strlen(compiler_perf.linker));
@@ -1076,11 +1178,13 @@ static char *compiler_build_target(C_Build *b, C_Target *t, DepState states[], c
         c__copy(depf, sizeof(depf), obj); strcat(depf, ".d"); vec_push(&objects, obj);
 
         StrVec a = {0};
-        vec_push(&a, opt->cc); compiler_push_standard(&a, source);
+        vec_push(&a, modules.count && compiler_cpp_source(source) ? cpp_module_compiler() : opt->cc);
+        compiler_push_standard(&a, source);
         if (opt->release) vec_push(&a, "-O2");
         else if (compiler_perf.fast_debug) { vec_push(&a, "-O1"); vec_push(&a, "-g1"); }
         else { vec_push(&a, "-O0"); vec_push(&a, "-g"); }
         vec_push(&a, "-MMD"); vec_push(&a, "-MF"); vec_push(&a, depf);
+        cpp_module_append_flags(&a, &modules, source);
         compiler_append_target_compile_flags(&a, t, b, states, source);
         if (t->kind == C_TARGET_SHARED_LIBRARY) vec_push(&a, "-fPIC");
         vec_push(&a, "-c"); vec_push(&a, source); vec_push(&a, "-o"); vec_push(&a, obj);
@@ -1118,7 +1222,7 @@ static char *compiler_build_target(C_Build *b, C_Target *t, DepState states[], c
             for (size_t i = 0; i < objects.count; ++i) vec_push(&a, objects.items[i]);
             note("AR", "%s", output); double link_started = compiler_perf_now_ms(); if (run_process_atomic_output(&a, opt->verbose, output) != 0) die("archive failed"); link_ms = compiler_perf_now_ms() - link_started; vec_free(&a);
         } else {
-            StrVec a = {0}; vec_push(&a, opt->cc); compiler_append_linker(&a);
+            StrVec a = {0}; vec_push(&a, modules.count ? cpp_module_compiler() : opt->cc); compiler_append_linker(&a);
             if (t->kind == C_TARGET_SHARED_LIBRARY) {
 #ifdef __APPLE__
                 vec_push(&a, "-dynamiclib");
@@ -1133,7 +1237,7 @@ static char *compiler_build_target(C_Build *b, C_Target *t, DepState states[], c
     } else note("CACHED", "%s", t->name);
 
     compiler_profile_report(t->name, link_ms);
-    vec_free(&sources); vec_free(&compile_sources); vec_free(&objects); return output;
+    vec_free(&sources); vec_free(&compile_sources); vec_free(&objects); cpp_module_free(&modules); return output;
 }
 
 static size_t compiler_target_index(C_Build *b, C_Target *t) {
@@ -1152,6 +1256,15 @@ static void compiler_append_target_link_closure(C_Build *b, C_Target *owner, C_T
         die("target %s links non-library target %s", owner->name, dep->name);
     if (!graph_outputs[idx]) die("internal target graph error for %s", dep->name);
     c__push(&owner->ldflags, graph_outputs[idx]);
+#ifdef __APPLE__
+    if (dep->kind == C_TARGET_SHARED_LIBRARY) {
+        const char *rpath = "-Wl,-rpath,@loader_path";
+        bool exists = false;
+        for (size_t i = 0; i < owner->ldflags.count; ++i)
+            if (!strcmp(owner->ldflags.items[i], rpath)) exists = true;
+        if (!exists) c__push(&owner->ldflags, rpath);
+    }
+#endif
     for (size_t i = 0; i < dep->target_dep_count; ++i)
         compiler_append_target_link_closure(b, owner, dep->target_deps[i], graph_outputs, seen);
 }
@@ -1302,6 +1415,151 @@ static void compiler_cmd_watch(const Options *opt) {
     }
 }
 
+
+/* Inspect a build without compiling sources or running project executables. */
+static void compiler_check_graph(C_Build *b, C_Target *t, unsigned char marks[]) {
+    size_t index = compiler_target_index(b, t);
+    if (marks[index] == 1) die("cyclic target dependency involving %s", t->name);
+    if (marks[index] == 2) return;
+    marks[index] = 1;
+    for (size_t i = 0; i < t->target_dep_count; ++i) {
+        C_Target *dep = t->target_deps[i];
+        if (dep->kind != C_TARGET_STATIC_LIBRARY && dep->kind != C_TARGET_SHARED_LIBRARY)
+            die("target %s links non-library target %s", t->name, dep->name);
+        compiler_check_graph(b, dep, marks);
+    }
+    marks[index] = 2;
+}
+
+static void compiler_cmd_check(const Options *opt) {
+    C_Build *b = alloc_build();
+    load_build(opt, b);
+    if (opt->target_name) (void)select_target(b, opt);
+    unsigned char marks[C_MAX_TARGETS] = {0};
+    for (size_t i = 0; i < b->target_count; ++i)
+        compiler_check_graph(b, &b->targets[i], marks);
+    size_t sources = 0;
+    for (size_t i = 0; i < b->target_count; ++i) {
+        C_Target *t = &b->targets[i];
+        if (t->generated_outputs.count != t->generated_inputs.count ||
+            t->generated_outputs.count != t->generated_commands.count)
+            die("target %s has an invalid generated-source description", t->name);
+        if (!t->sources.count && !t->dep_count && !t->generated_outputs.count)
+            die("target %s has no sources", t->name);
+        for (size_t j = 0; j < t->sources.count; ++j) {
+            const char *pattern = t->sources.items[j];
+            glob_t found = {0};
+            int rc = glob(pattern, 0, NULL, &found);
+            if (rc == GLOB_NOMATCH) {
+                bool generated = false;
+                for (size_t k = 0; k < t->generated_outputs.count; ++k)
+                    if (fnmatch(pattern, t->generated_outputs.items[k], 0) == 0)
+                        generated = true;
+                globfree(&found);
+                if (generated) continue;
+                die("source pattern matched nothing: %s", pattern);
+            }
+            if (rc != 0) die("source pattern matched nothing or failed: %s", pattern);
+            sources += found.gl_pathc;
+            globfree(&found);
+        }
+    }
+    note("CHECK", "%zu targets, %zu dependencies, %zu source files",
+         b->target_count, b->dep_count, sources);
+    free_build(b);
+}
+
+static void compiler_compdb_expand_sources(C_Target *t, C_Build *b,
+                                           DepState states[], StrVec *out) {
+    for (size_t i = 0; i < t->sources.count; ++i) {
+        const char *pattern = t->sources.items[i];
+        glob_t matches = {0};
+        int rc = glob(pattern, 0, NULL, &matches);
+        if (rc == 0) {
+            for (size_t j = 0; j < matches.gl_pathc; ++j)
+                vec_push(out, matches.gl_pathv[j]);
+        } else if (rc == GLOB_NOMATCH) {
+            bool matched = false;
+            for (size_t j = 0; j < t->generated_outputs.count; ++j)
+                if (fnmatch(pattern, t->generated_outputs.items[j], 0) == 0) {
+                    vec_push(out, t->generated_outputs.items[j]);
+                    matched = true;
+                }
+            if (!matched) die("source pattern matched nothing: %s", pattern);
+        } else die("source glob failed: %s", pattern);
+        globfree(&matches);
+    }
+    for (size_t i = 0; i < t->dep_count; ++i) {
+        C_Dependency *d = t->deps[i];
+        if (d->kind != C_DEP_SOURCE) continue;
+        ptrdiff_t idx = d - b->deps;
+        if (idx < 0 || (size_t)idx >= b->dep_count) die("invalid dependency");
+        char root[PATH_MAX];
+        if (d->subdir[0]) path_join(root, states[idx].source, d->subdir);
+        else c__copy(root, sizeof(root), states[idx].source);
+        for (size_t j = 0; j < d->source_patterns.count; ++j) {
+            char pattern[PATH_MAX];
+            path_join(pattern, root, d->source_patterns.items[j]);
+            expand_pattern(pattern, out);
+        }
+    }
+}
+
+/* Generate editor compile commands without compiling or linking a target. */
+static void compiler_cmd_compdb(const Options *opt) {
+    C_Build *b = alloc_build();
+    load_build(opt, b);
+    C_Target *selected = opt->target_name ? select_target(b, opt) : NULL;
+    DepState states[C_MAX_DEPS] = {0};
+    LockFile lock;
+    load_lock(&lock);
+    for (size_t i = 0; i < b->dep_count; ++i) {
+        C_Dependency *d = &b->deps[i];
+        if (d->kind == C_DEP_PKGCONFIG) { compiler_resolve_pkg_config(d); continue; }
+        resolve_dependency(d, opt, &lock, &states[i], false);
+    }
+    save_lock(&lock);
+    expand_dependency_paths(b, states);
+
+    char cwd[PATH_MAX];
+    if (!getcwd(cwd, sizeof(cwd))) die("getcwd failed");
+    FILE *db = fopen("compile_commands.json", "w");
+    if (!db) die("cannot write compile_commands.json: %s", strerror(errno));
+    bool first = true;
+    size_t total = 0;
+    fputs("[\n", db);
+    for (size_t i = 0; i < b->target_count; ++i) {
+        C_Target *t = &b->targets[i];
+        if (selected && selected != t) continue;
+        StrVec sources = {0};
+        compiler_compdb_expand_sources(t, b, states, &sources);
+        for (size_t j = 0; j < sources.count; ++j) {
+            const char *src = sources.items[j];
+            char objdir[PATH_MAX], obj[PATH_MAX];
+            snprintf(objdir, sizeof(objdir), "build/.compdb/%s", t->name);
+            object_path(objdir, src, obj);
+            StrVec a = {0};
+            vec_push(&a, opt->cc);
+            compiler_push_standard(&a, src);
+            vec_push(&a, opt->release ? "-O2" : "-O0");
+            if (!opt->release) vec_push(&a, "-g");
+            compiler_append_target_compile_flags(&a, t, b, states, src);
+            vec_push(&a, "-c");
+            vec_push(&a, src);
+            vec_push(&a, "-o");
+            vec_push(&a, obj);
+            write_compile_command(db, &first, &a, src, cwd);
+            vec_free(&a);
+            ++total;
+        }
+        vec_free(&sources);
+    }
+    fputs("\n]\n", db);
+    if (fclose(db) != 0) die("cannot close compile_commands.json");
+    note("COMPDB", "compile_commands.json (%zu entries)", total);
+    free_build(b);
+}
+
 static int compiler_dispatch(int argc, char **argv) {
     compiler_perf_defaults();
     int filtered_argc = 0;
@@ -1313,6 +1571,9 @@ static int compiler_dispatch(int argc, char **argv) {
     else if (!strcmp(opt.command, "watch")) compiler_cmd_watch(&opt);
     else if (!strcmp(opt.command, "test")) compiler_cmd_test(&opt);
     else if (!strcmp(opt.command, "doctor")) compiler_cmd_doctor(&opt);
+    else if (!strcmp(opt.command, "check")) compiler_cmd_check(&opt);
+    else if (!strcmp(opt.command, "compdb")) compiler_cmd_compdb(&opt);
+    else if (!strcmp(opt.command, "tree")) { Options tree = opt; tree.target_name = "tree"; cmd_deps(&tree); }
     else rc = c_legacy_main(filtered_argc, filtered_argv);
     free(filtered_argv);
     return rc;
@@ -1321,6 +1582,7 @@ static int compiler_dispatch(int argc, char **argv) {
 static bool cli_is_command(const char *s) {
     static const char *commands[] = {
         "init", "build", "run", "watch", "fetch", "update", "deps", "test",
+        "check", "tree", "compdb",
         "clean", "cache", "doctor", "help", "--help", "-h",
         "version", "--version"
     };
@@ -1333,7 +1595,7 @@ static bool cli_is_version_or_help(const char *s) {
 }
 
 static bool cli_is_action(const char *s) {
-    return !strcmp(s, "init") || !strcmp(s, "build") || !strcmp(s, "run") || !strcmp(s, "watch") || !strcmp(s, "fetch") || !strcmp(s, "update") || !strcmp(s, "test") || !strcmp(s, "clean") || !strcmp(s, "cache");
+    return !strcmp(s, "init") || !strcmp(s, "build") || !strcmp(s, "run") || !strcmp(s, "watch") || !strcmp(s, "check") || !strcmp(s, "compdb") || !strcmp(s, "fetch") || !strcmp(s, "update") || !strcmp(s, "test") || !strcmp(s, "clean") || !strcmp(s, "cache");
 }
 
 static bool cli_jobs_option(const char *arg) {
@@ -1400,6 +1662,9 @@ static const char *cli_step_name(const char *kind) {
     if (!strcmp(kind, "WATCH")) return "watch";
     if (!strcmp(kind, "CLEAN")) return "clean";
     if (!strcmp(kind, "INIT")) return "init";
+    if (!strcmp(kind, "CHECK")) return "check";
+    if (!strcmp(kind, "COMPDB")) return "compdb";
+    if (!strcmp(kind, "MODULE")) return "module";
     return NULL;
 }
 

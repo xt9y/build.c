@@ -3,9 +3,11 @@
 #include "cbuild.h"
 
 #include <dirent.h>
+#include <ctype.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <fnmatch.h>
 #include <glob.h>
 #include <limits.h>
 #include <stdarg.h>
@@ -536,6 +538,8 @@ static void free_build(C_Build *b) {
         free_c_list(&t->sources);
         free_c_list(&t->includes);
         free_c_list(&t->defines);
+        free_c_list(&t->public_includes);
+        free_c_list(&t->public_defines);
         free_c_list(&t->cflags);
         free_c_list(&t->ldflags);
         free_c_list(&t->system_links);
@@ -719,7 +723,67 @@ static bool ensure_git_mirror(const C_Dependency *d, const Options *opt, const c
     return false;
 }
 
-static void resolve_dependency(const C_Dependency *d, const Options *opt, LockFile *lock, DepState *state, bool build_artifacts) {
+
+static void read_registry_source(const char *path, char url[C_MAX_PATH], char commit[80]) {
+    FILE *f = fopen(path, "r");
+    if (!f) die("registry source not found: %s", path);
+    url[0] = '\0';
+    commit[0] = '\0';
+    char line[2048];
+    while (fgets(line, sizeof(line), f)) {
+        char key[32], value[C_MAX_PATH];
+        if (sscanf(line, " %31[a-zA-Z_] = \"%1023[^\"]\"", key, value) != 2)
+            continue;
+        if (!strcmp(key, "git")) c__copy(url, C_MAX_PATH, value);
+        else if (!strcmp(key, "commit")) c__copy(commit, 80, value);
+    }
+    fclose(f);
+    if (strncmp(url, "https://", 8)) die("registry source must use an https:// git URL: %s", path);
+    if (strlen(commit) != 40) die("registry commit must be a 40-character hash: %s", path);
+    for (const char *p = commit; *p; ++p)
+        if (!isxdigit((unsigned char)*p)) die("invalid registry commit: %s", path);
+}
+
+static void resolve_dependency(C_Dependency *d, const Options *opt, LockFile *lock, DepState *state, bool build_artifacts) {
+    if (d->registry) {
+        C_Dependency index = {0};
+        c__copy(index.name, sizeof(index.name), "__c_registry__");
+        const char *configured = getenv("C_REGISTRY_URL");
+        c__copy(index.git, sizeof(index.git),
+                configured && *configured ? configured : "https://github.com/FloofyPlasma/smelt-registry");
+        if (strncmp(index.git, "https://", 8)) die("C_REGISTRY_URL must be an https:// git URL");
+        c__copy(index.ref, sizeof(index.ref), "HEAD");
+        index.kind = C_DEP_HEADER_ONLY;
+        DepState registry_state = {0};
+        resolve_dependency(&index, opt, lock, &registry_state, false);
+
+        char spec[PATH_MAX], upstream[C_MAX_PATH], commit[80];
+        int n = snprintf(spec, sizeof(spec), "%s/packages/%s/%s/source.smelt",
+                         registry_state.source, d->registry_package, d->registry_version);
+        if (n < 0 || n >= (int)sizeof(spec)) die("registry package path is too long");
+        read_registry_source(spec, upstream, commit);
+        C_Dependency pinned = *d;
+        pinned.registry = 0;
+        c__copy(pinned.git, sizeof(pinned.git), upstream);
+        c__copy(pinned.ref, sizeof(pinned.ref), commit);
+        resolve_dependency(&pinned, opt, lock, state, build_artifacts);
+        c__copy(d->git, sizeof(d->git), pinned.git);
+        c__copy(d->ref, sizeof(d->ref), pinned.ref);
+        return;
+    }
+    if (d->local_path) {
+        if (!realpath(d->git, state->source) || !is_dir(state->source))
+            die("local dependency '%s' directory not found: %s", d->name, d->git);
+        char cache[PATH_MAX], pkgroot[PATH_MAX], key[17], name[C_MAX_NAME + 32];
+        cache_root(cache);
+        path_join(pkgroot, cache, "local");
+        hash_hex(state->source, key);
+        snprintf(name, sizeof(name), "%s-%s", d->name, key);
+        path_join(state->package, pkgroot, name);
+        mkdir_p(state->package);
+        c__copy(state->resolved, sizeof(state->resolved), "local");
+        return;
+    }
     LockEntry *e = lock_for(lock, d);
     char mirror[PATH_MAX];
     bool fetched = ensure_git_mirror(d, opt, e ? e->resolved : d->ref, mirror);
@@ -1057,7 +1121,9 @@ static char *build_target(C_Build *b, C_Target *t, DepState states[], const Opti
 
 static void resolve_all(C_Build *b, const Options *opt, DepState states[], bool build_artifacts) {
     LockFile lock; load_lock(&lock);
-    for (size_t i = 0; i < b->dep_count; ++i) resolve_dependency(&b->deps[i], opt, &lock, &states[i], build_artifacts);
+    for (size_t i = 0; i < b->dep_count; ++i)
+        if (b->deps[i].kind != C_DEP_PKGCONFIG)
+            resolve_dependency(&b->deps[i], opt, &lock, &states[i], build_artifacts);
     save_lock(&lock);
 }
 
@@ -1097,7 +1163,7 @@ static void cmd_fetch(const Options *opt) {
 }
 
 static const char *dep_kind_name(C_DepKind kind) {
-    return kind == C_DEP_CMAKE ? "cmake" : kind == C_DEP_SOURCE ? "source" : "header";
+    return kind == C_DEP_PKGCONFIG ? "pkg-config" : kind == C_DEP_CMAKE ? "cmake" : kind == C_DEP_SOURCE ? "source" : "header";
 }
 
 static void cmd_deps(const Options *opt) {
@@ -1275,6 +1341,9 @@ static void usage(void) {
          "  c fetch\n"
          "  c update [dependency]\n"
          "  c deps [tree|clean]\n"
+         "  c tree\n"
+         "  c check [target]\n"
+         "  c compdb [target]\n"
          "  c test [target]\n"
          "  c clean\n"
          "  c cache [stats|clean]\n"

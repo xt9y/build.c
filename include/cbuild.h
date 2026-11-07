@@ -47,7 +47,8 @@ typedef enum C_DepKind {
     C_DEP_HEADER_ONLY = 0,
     C_DEP_RESERVED = 1,
     C_DEP_SOURCE = 2,
-    C_DEP_CBUILD = 3
+    C_DEP_CBUILD = 3,
+    C_DEP_PKGCONFIG = 4
 } C_DepKind;
 
 /* CMake dependencies occupy the 1.x reserved dependency slot. */
@@ -73,6 +74,10 @@ typedef struct C_Dependency {
     char subdir[C_MAX_PATH];
     C_DepKind kind;
     int asset_only; /* opted-in: selected mappings may use sparse Git checkout */
+    int local_path; /* local source directory; not written to c.lock */
+    int registry; /* resolve pinned Git source from a package registry */
+    char registry_package[C_MAX_NAME];
+    char registry_version[C_MAX_NAME];
     C_StringList links;          /* internal paired source/destination storage for c_dep_asset */
     C_StringList include_dirs;
     C_StringList source_patterns;
@@ -88,6 +93,8 @@ typedef struct C_Target {
     C_StringList sources;
     C_StringList includes;
     C_StringList defines;
+    C_StringList public_includes; /* exported to target consumers */
+    C_StringList public_defines;
     C_StringList cflags;
     C_StringList ldflags;
     C_StringList system_links;
@@ -100,6 +107,7 @@ typedef struct C_Target {
     struct C_Target *target_deps[C_MAX_TARGETS];
     size_t target_dep_count;
     int unity_chunk;  /* 0=inherit CLI, 1=off, -1=auto, >=2=fixed chunk */
+    char std_module_source[C_MAX_PATH]; /* empty=disabled, @auto@=search libc++ */
 } C_Target;
 
 typedef struct C_Build {
@@ -210,6 +218,15 @@ static inline void c_default_target(C_Build *b, C_Target *target) {
  * Example: c_sources(target, "@raylib@/src/rcore.c"); */
 static inline void c_sources(C_Target *t, const char *pattern) { if (!t) c__fatal("c_sources received a null target"); c__push(&t->sources, pattern); }
 static inline void c_include(C_Target *t, const char *path) { if (!t) c__fatal("c_include received a null target"); c__push(&t->includes, path); }
+/* Public usage requirements are inherited by downstream target dependencies. */
+static inline void c_public_include(C_Target *t, const char *path) {
+    if (!t) c__fatal("c_public_include received a null target");
+    c__push(&t->public_includes, path);
+}
+static inline void c_public_define(C_Target *t, const char *value) {
+    if (!t) c__fatal("c_public_define received a null target");
+    c__push(&t->public_defines, value);
+}
 static inline void c_define(C_Target *t, const char *value) { if (!t) c__fatal("c_define received a null target"); c__push(&t->defines, value); }
 static inline void c_flag(C_Target *t, const char *value) { if (!t) c__fatal("c_flag received a null target"); c__push(&t->cflags, value); }
 static inline void c_link_flag(C_Target *t, const char *value) { if (!t) c__fatal("c_link_flag received a null target"); c__push(&t->ldflags, value); }
@@ -218,6 +235,12 @@ static inline void c_framework(C_Target *t, const char *name) { if (!t) c__fatal
 static inline void c_unity(C_Target *t, int chunk_size) { if (!t) c__fatal("c_unity received a null target"); t->unity_chunk = chunk_size > 1 ? chunk_size : 1; }
 static inline void c_unity_auto(C_Target *t) { if (!t) c__fatal("c_unity_auto received a null target"); t->unity_chunk = -1; }
 static inline void c_no_unity(C_Target *t) { if (!t) c__fatal("c_no_unity received a null target"); t->unity_chunk = 1; }
+/* Opt into the Clang C++23 standard library module. Pass NULL for discovery. */
+static inline void c_std_module(C_Target *t, const char *source) {
+    if (!t) c__fatal("c_std_module received a null target");
+    c__copy(t->std_module_source, sizeof(t->std_module_source),
+            source && *source ? source : "@auto@");
+}
 
 static inline void c_standard(C_Target *t, C_Standard standard) {
     if (!t) c__fatal("c_standard received a null target");
@@ -277,6 +300,54 @@ static inline C_Dependency *c_git(C_Build *b, const char *name, const char *git,
     c__copy(d->git, sizeof(d->git), git);
     c__copy(d->ref, sizeof(d->ref), (ref && ref[0]) ? ref : "HEAD");
     d->kind = C_DEP_HEADER_ONLY;
+    return d;
+}
+
+/* Link flags and include paths are resolved using pkg-config at build time. */
+/* A directory containing headers, source files, or a separate build.c project. */
+static inline C_Dependency *c_path(C_Build *b, const char *name, const char *path) {
+    c__check_dep_name(b, name);
+    if (!path || !*path) c__fatal("local dependency path is empty");
+    if (b->dep_count >= C_MAX_DEPS) c__fatal("too many dependencies");
+    C_Dependency *d = &b->deps[b->dep_count++];
+    memset(d, 0, sizeof(*d));
+    c__copy(d->name, sizeof(d->name), name);
+    c__copy(d->git, sizeof(d->git), path);
+    d->local_path = 1;
+    d->kind = C_DEP_HEADER_ONLY;
+    return d;
+}
+
+/* The registry supplies an immutable upstream Git commit.
+ * Build settings remain in build.c via c_dep_source()/c_dep_cbuild(). */
+static inline C_Dependency *c_registry(C_Build *b, const char *name,
+                                       const char *package, const char *version) {
+    c__check_dep_name(b, name);
+    c__require_name(package, "registry package");
+    c__require_name(version, "registry version");
+    if (strchr(package, '/') || strchr(package, '\\') || !strcmp(package, "..") ||
+        strchr(version, '/') || strchr(version, '\\') || strstr(version, ".."))
+        c__fatal("invalid registry package or version");
+    if (b->dep_count >= C_MAX_DEPS) c__fatal("too many dependencies");
+    C_Dependency *d = &b->deps[b->dep_count++];
+    memset(d, 0, sizeof(*d));
+    c__copy(d->name, sizeof(d->name), name);
+    c__copy(d->registry_package, sizeof(d->registry_package), package);
+    c__copy(d->registry_version, sizeof(d->registry_version), version);
+    d->registry = 1;
+    d->kind = C_DEP_HEADER_ONLY;
+    return d;
+}
+
+static inline C_Dependency *c_pkg_config(C_Build *b, const char *name, const char *package) {
+    c__check_dep_name(b, name);
+    c__require_name(package, "pkg-config package");
+    if (b->dep_count >= C_MAX_DEPS) c__fatal("too many dependencies");
+    C_Dependency *d = &b->deps[b->dep_count++];
+    memset(d, 0, sizeof(*d));
+    c__copy(d->name, sizeof(d->name), name);
+    c__copy(d->ref, sizeof(d->ref), package);
+    d->kind = C_DEP_PKGCONFIG;
     return d;
 }
 

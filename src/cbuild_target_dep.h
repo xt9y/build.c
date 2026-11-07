@@ -317,7 +317,7 @@ static void compiler_publish_dependency_assets(C_Dependency *d, const DepState *
     if (!compiler_cbuild_list_contains(&d->include_dirs, include_dir)) c__push(&d->include_dirs, include_dir);
 }
 
-static void compiler_cbuild_resolve_dependency(const C_Dependency *d, const Options *opt,
+static void compiler_cbuild_resolve_dependency(C_Dependency *d, const Options *opt,
                                                LockFile *lock, DepState *state, bool build_artifacts) {
     const bool cmake_dependency = d->kind == COMPILER_DEP_CMAKE;
     resolve_dependency(d, opt, lock, state, build_artifacts || cmake_dependency);

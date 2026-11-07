@@ -29,7 +29,65 @@ static bool checkout_path_valid(const char *path) {
     }
 }
 
+static void windows_read_registry_source(const char *path, char url[C_MAX_PATH], char commit[80]) {
+    FILE *f = fopen(path, "r");
+    if (!f) die("registry source not found: %s", path);
+    url[0] = '\0';
+    commit[0] = '\0';
+    char line[2048];
+    while (fgets(line, sizeof(line), f)) {
+        char key[32], value[C_MAX_PATH];
+        if (sscanf(line, " %31[a-zA-Z_] = \"%1023[^\"]\"", key, value) != 2) continue;
+        if (!strcmp(key, "git")) snprintf(url, C_MAX_PATH, "%s", value);
+        else if (!strcmp(key, "commit")) snprintf(commit, 80, "%s", value);
+    }
+    fclose(f);
+    if (strncmp(url, "https://", 8)) die("registry source must use an https:// git URL: %s", path);
+    if (strlen(commit) != 40) die("registry commit must be a 40-character hash: %s", path);
+    for (const char *p = commit; *p; ++p)
+        if (!isxdigit((unsigned char)*p)) die("invalid registry commit: %s", path);
+}
+
 static void resolve_dependency(C_Dependency *d, const Options *opt, LockFile *lock, DepState *s) {
+    if (d->registry) {
+        C_Dependency index = {0};
+        snprintf(index.name, sizeof(index.name), "__c_registry__");
+        const char *configured = getenv("C_REGISTRY_URL");
+        snprintf(index.git, sizeof(index.git), "%s",
+                 configured && *configured ? configured : "https://github.com/FloofyPlasma/smelt-registry");
+        if (strncmp(index.git, "https://", 8)) die("C_REGISTRY_URL must be an https:// git URL");
+        snprintf(index.ref, sizeof(index.ref), "HEAD");
+        index.kind = C_DEP_HEADER_ONLY;
+        DepState registry_state = {0};
+        resolve_dependency(&index, opt, lock, &registry_state);
+
+        char spec[PATH_MAX], upstream[C_MAX_PATH], commit[80];
+        int n = snprintf(spec, sizeof(spec), "%s/packages/%s/%s/source.smelt",
+                         registry_state.source, d->registry_package, d->registry_version);
+        if (n < 0 || n >= (int)sizeof(spec)) die("registry package path is too long");
+        windows_read_registry_source(spec, upstream, commit);
+        C_Dependency pinned = *d;
+        pinned.registry = 0;
+        snprintf(pinned.git, sizeof(pinned.git), "%s", upstream);
+        snprintf(pinned.ref, sizeof(pinned.ref), "%s", commit);
+        resolve_dependency(&pinned, opt, lock, s);
+        snprintf(d->git, sizeof(d->git), "%s", pinned.git);
+        snprintf(d->ref, sizeof(d->ref), "%s", pinned.ref);
+        return;
+    }
+    if (d->local_path) {
+        if (!_fullpath(s->source, d->git, PATH_MAX) || !is_dir(s->source))
+            die("local dependency '%s' directory not found: %s", d->name, d->git);
+        char cache[PATH_MAX], root[PATH_MAX], key[17], name[C_MAX_NAME + 32];
+        cache_root(cache);
+        path_join(root, cache, "local");
+        hash_hex(hash_string(s->source), key);
+        snprintf(name, sizeof(name), "%s-%s", d->name, key);
+        path_join(s->package, root, name);
+        mkdir_p(s->package);
+        snprintf(s->resolved, sizeof(s->resolved), "local");
+        return;
+    }
     char cache[PATH_MAX], gitroot[PATH_MAX], srcroot[PATH_MAX], pkgroot[PATH_MAX];
     cache_root(cache); path_join(gitroot, cache, "git"); path_join(srcroot, cache, "src"); path_join(pkgroot, cache, "pkg");
     mkdir_p(gitroot); mkdir_p(srcroot); mkdir_p(pkgroot);
@@ -89,7 +147,11 @@ static void resolve_dependency(C_Dependency *d, const Options *opt, LockFile *lo
 
 static void resolve_all(C_Build *b, const Options *opt, DepState states[]) {
     LockFile lock; load_lock(&lock);
-    for (size_t i = 0; i < b->dep_count; ++i) resolve_dependency(&b->deps[i], opt, &lock, &states[i]);
+    for (size_t i = 0; i < b->dep_count; ++i) {
+        if (b->deps[i].kind == C_DEP_PKGCONFIG)
+            die("pkg-config dependencies are currently unsupported on native Windows");
+        resolve_dependency(&b->deps[i], opt, &lock, &states[i]);
+    }
     save_lock(&lock);
 }
 
@@ -129,7 +191,29 @@ static void generated_sources(C_Target *t, const Options *opt) {
     }
 }
 
+static void append_public_usage(StrVec *a, C_Target *t, C_Build *b,
+                                bool visited[C_MAX_TARGETS]) {
+    ptrdiff_t idx = t - b->targets;
+    if (idx < 0 || (size_t)idx >= b->target_count) die("invalid target usage graph");
+    if (visited[idx]) return;
+    visited[idx] = true;
+    for (size_t i = 0; i < t->public_includes.count; ++i) {
+        char arg[PATH_MAX + 3];
+        snprintf(arg, sizeof(arg), "-I%s", t->public_includes.items[i]);
+        vec_push(a, arg);
+    }
+    for (size_t i = 0; i < t->public_defines.count; ++i) {
+        char arg[PATH_MAX + 3];
+        snprintf(arg, sizeof(arg), "-D%s", t->public_defines.items[i]);
+        vec_push(a, arg);
+    }
+    for (size_t i = 0; i < t->target_dep_count; ++i)
+        append_public_usage(a, t->target_deps[i], b, visited);
+}
+
 static void compiler_flags(StrVec *a, C_Target *t, C_Build *b, DepState states[], const Options *opt, const char *src) {
+    if (t->std_module_source[0] || strstr(src, ".cppm"))
+        die("C++ named modules are not yet supported by the native Windows compiler backend");
     vec_push(a, opt->cc);
     bool has_std = false;
     for (size_t i = 0; i < t->cflags.count; ++i) if (!strncmp(t->cflags.items[i], "-std=", 5)) has_std = true;
@@ -138,6 +222,8 @@ static void compiler_flags(StrVec *a, C_Target *t, C_Build *b, DepState states[]
     if (!opt->release) vec_push(a, "-g");
     for (size_t i = 0; i < t->includes.count; ++i) { char x[PATH_MAX + 3]; snprintf(x, sizeof(x), "-I%s", t->includes.items[i]); vec_push(a, x); }
     for (size_t i = 0; i < t->defines.count; ++i) { char x[PATH_MAX + 3]; snprintf(x, sizeof(x), "-D%s", t->defines.items[i]); vec_push(a, x); }
+    bool visited[C_MAX_TARGETS] = {0};
+    append_public_usage(a, t, b, visited);
     for (size_t i = 0; i < t->cflags.count; ++i) vec_push(a, t->cflags.items[i]);
     append_dep_compile_flags(a, t, b, states);
 }
@@ -146,7 +232,7 @@ static void build_source_dependency(C_Dependency *d, const Options *opt, DepStat
     if (d->kind != C_DEP_SOURCE) return;
     if (!d->source_patterns.count) die("source dependency %s has no sources", d->name);
     char lib[PATH_MAX]; path_join(lib, s->package, "dependency.a"); snprintf(s->artifact, PATH_MAX, "%s", lib);
-    if (file_exists(lib)) return;
+    if (file_exists(lib) && !d->local_path) return;
     char root[PATH_MAX]; dep_root(d, s, root); char objdir[PATH_MAX]; path_join(objdir, s->package, ".objs"); mkdir_p(objdir);
     StrVec objects = {0};
     for (size_t pi = 0; pi < d->source_patterns.count; ++pi) {
