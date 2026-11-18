@@ -1009,6 +1009,27 @@ static void append_link_flags(StrVec *a, const C_Target *t, C_Build *b, DepState
     for (size_t i = 0; i < t->ldflags.count; ++i) vec_push(a, t->ldflags.items[i]);
 }
 
+// A cached executable is stale when an input archive or shared library
+// changes, even when none of its own object files were recompiled.
+static bool linked_file_not_older(const char *path, const char *output) {
+    struct stat input_info, output_info;
+    if (stat(path, &input_info) != 0 ||
+        !S_ISREG(input_info.st_mode) ||
+        stat(output, &output_info) != 0) return false;
+#ifdef __APPLE__
+    const struct timespec input_time = input_info.st_mtimespec;
+    const struct timespec output_time = output_info.st_mtimespec;
+#else
+    const struct timespec input_time = input_info.st_mtim;
+    const struct timespec output_time = output_info.st_mtim;
+#endif
+    // Equality must rebuild too: a filesystem may timestamp two outputs
+    // within the same clock tick despite their dependency order.
+    return input_time.tv_sec > output_time.tv_sec ||
+        (input_time.tv_sec == output_time.tv_sec &&
+         input_time.tv_nsec >= output_time.tv_nsec);
+}
+
 static char *build_target(C_Build *b, C_Target *t, DepState states[], const Options *opt) {
     StrVec sources = {0}, objects = {0};
     expand_sources(t, b, states, &sources);
@@ -1042,6 +1063,9 @@ static char *build_target(C_Build *b, C_Target *t, DepState states[], const Opti
     bool relink = !file_exists(output) || !ready_marker_matches(output, "artifact");
     time_t outt = mtime_of(output);
     for (size_t i = 0; i < objects.count; ++i) if (mtime_of(objects.items[i]) > outt) relink = true;
+    if (t->kind != C_TARGET_STATIC_LIBRARY)
+        for (size_t i = 0; i < t->ldflags.count; ++i)
+            if (linked_file_not_older(t->ldflags.items[i], output)) relink = true;
 
     if (relink || compiled) {
         if (t->kind == C_TARGET_STATIC_LIBRARY) {
