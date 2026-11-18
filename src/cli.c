@@ -1111,6 +1111,12 @@ static char *compiler_build_target(C_Build *b, C_Target *t, DepState states[], c
     bool relink = !file_exists(output) || !ready_marker_matches(output, "artifact"); time_t outt = mtime_of(output);
     double link_ms = 0.0;
     for (size_t i = 0; i < objects.count; ++i) if (mtime_of(objects.items[i]) > outt) relink = true;
+    // The target graph places linked static/shared library artifacts in
+    // ldflags. An archive update must relink its consumers even if their own
+    // object files remain unchanged (the common vs.a -> vulkan-client case).
+    if (t->kind != C_TARGET_STATIC_LIBRARY)
+        for (size_t i = 0; i < t->ldflags.count; ++i)
+            if (linked_file_not_older(t->ldflags.items[i], output)) relink = true;
 
     if (relink || compiled || cache_hits) {
         if (t->kind == C_TARGET_STATIC_LIBRARY) {
