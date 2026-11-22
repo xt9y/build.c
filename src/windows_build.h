@@ -343,6 +343,15 @@ static C_Target *select_target(C_Build *b, const Options *opt) {
 
 static char *build_target_graph(C_Build *b, C_Target *t, DepState states[], const Options *opt, unsigned char mark[], char *outputs[]);
 
+static bool target_has_cpp_sources(const StrVec *sources) {
+    for (size_t i = 0; i < sources->count; ++i) {
+        const char *ext = strrchr(sources->items[i], '.');
+        if (ext && (!_stricmp(ext, ".cpp") || !_stricmp(ext, ".cc") ||
+                    !_stricmp(ext, ".cxx") || !_stricmp(ext, ".c++"))) return true;
+    }
+    return false;
+}
+
 static char *build_one(C_Build *b, C_Target *t, DepState states[], const Options *opt, char *outputs[]) {
     generated_sources(t, opt);
     StrVec sources = {0}, objects = {0};
@@ -380,7 +389,13 @@ static char *build_one(C_Build *b, C_Target *t, DepState states[], const Options
             StrVec a = {0}; const char *ar = getenv("AR"); if (!ar || !*ar) ar = "ar"; vec_push(&a, ar); vec_push(&a, "rcs"); vec_push(&a, output); for (size_t i = 0; i < objects.count; ++i) vec_push(&a, objects.items[i]);
             note("AR", "%s", output); if (run_vec(&a, opt->verbose, NULL) != 0) die("archive failed"); vec_free(&a);
         } else {
-            StrVec a = {0}; vec_push(&a, opt->cc); if (t->kind == C_TARGET_SHARED_LIBRARY) vec_push(&a, "-shared"); for (size_t i = 0; i < objects.count; ++i) vec_push(&a, objects.items[i]);
+            StrVec a = {0};
+            const char *linker = opt->cc;
+            if (target_has_cpp_sources(&sources)) {
+                const char *cxx = getenv("CXX");
+                linker = cxx && *cxx ? cxx : "c++";
+            }
+            vec_push(&a, linker); if (t->kind == C_TARGET_SHARED_LIBRARY) vec_push(&a, "-shared"); for (size_t i = 0; i < objects.count; ++i) vec_push(&a, objects.items[i]);
             for (size_t i = 0; i < t->target_dep_count; ++i) { ptrdiff_t idx = t->target_deps[i] - b->targets; if (idx >= 0 && (size_t)idx < b->target_count && outputs[idx]) vec_push(&a, outputs[idx]); }
             append_link_flags(&a, t, b, states, opt); vec_push(&a, "-o"); vec_push(&a, output); note("LINK", "%s", output); if (run_vec(&a, opt->verbose, NULL) != 0) die("link failed"); vec_free(&a);
         }
